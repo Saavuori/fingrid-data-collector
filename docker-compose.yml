@@ -6,6 +6,8 @@ services:
     restart: unless-stopped
     ports:
       - "3001:3000" # Maps port 3001 to Axum's 3000 to avoid conflicts with Helen on 3000
+    networks:
+      - web-proxy
     volumes:
       - ./credentials.json:/app/credentials.json
       - ./active_datasets.json:/app/active_datasets.json
@@ -27,3 +29,7 @@ services:
       - DOCKER_API_VERSION=1.45
     labels:
       - "com.centurylinklabs.watchtower.scope=fingrid-collector"
+
+networks:
+  web-proxy:
+    external: true
