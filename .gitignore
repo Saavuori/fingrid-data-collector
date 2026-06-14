@@ -1,6 +1,5 @@
 # Rust/Cargo
 /backend/target/
-/backend/Cargo.lock
 /backend/credentials.json
 /backend/active_datasets.json
 /backend/influx_config.json
