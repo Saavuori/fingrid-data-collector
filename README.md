@@ -17,17 +17,39 @@ A self-hosted tool that retrieves metrics from the new Fingrid Open Data API and
 
 ---
 
-## Quick Start
+## Installation & Setup
 
-### 1. Build and Run the App
+### A. Production Setup (Recommended)
 
-Ensure you have Docker and Docker Compose installed, then run:
+Run the installer command to download the compose files, initialize configuration placeholders, and prepare the directory:
 
 ```bash
-docker compose up -d --build
+curl -fsSL https://raw.githubusercontent.com/Saavuori/fingrid-data-collector/main/install.sh | bash
 ```
 
-### 2. Configure Settings
+Move into the created directory and start the collector container:
+
+```bash
+cd fingrid-collector
+docker compose up -d
+```
+
+### B. Building From Source (Development)
+
+If you cloned the source code directly and want to build the Docker image locally:
+
+1. **Initialize Configurations**: Create file placeholders first to prevent Docker from mapping the volume paths as directories on the host:
+   ```bash
+   touch backend/credentials.json backend/active_datasets.json backend/influx_config.json
+   ```
+2. **Build and Run**:
+   ```bash
+   docker compose up -d --build
+   ```
+
+---
+
+## Configuration
 
 1. Open the Web UI: `http://localhost:3001` (or your reverse proxy URL).
 2. Enter your Fingrid API Key (get one free by signing up at [data.fingrid.fi](https://data.fingrid.fi/)).
