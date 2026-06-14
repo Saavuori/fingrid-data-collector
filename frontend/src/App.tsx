@@ -309,7 +309,10 @@ export default function App() {
       queryClient.invalidateQueries({ queryKey: ['status'] });
       queryClient.invalidateQueries({ queryKey: ['datasets'] });
     } catch (err: any) {
-      setLoginError(err.response?.data?.message || 'Login failed. Please check your API key.');
+      const serverMsg = typeof err.response?.data === 'string'
+        ? err.response.data
+        : err.response?.data?.message;
+      setLoginError(serverMsg || 'Login failed. Please check your API key.');
     } finally {
       setLoginLoading(false);
     }

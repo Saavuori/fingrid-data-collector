@@ -249,7 +249,9 @@ const Settings: React.FC<SettingsProps> = ({ onClose, onApiKeySaved }) => {
       const r = await axios.get('/api/influx/status');
       setStatus(r.data);
     } catch (e: any) {
-      const errorMsg = e.response?.data?.message || e.message || 'unknown error';
+      const errorMsg = typeof e.response?.data === 'string'
+        ? e.response.data
+        : e.response?.data?.message || e.message || 'unknown error';
       setSaveMsg('Save failed: ' + errorMsg);
     } finally {
       setLoadingSave(false);
