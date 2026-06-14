@@ -532,10 +532,13 @@ export default function App() {
                   <Text size={200} style={{ color: tokens.colorNeutralForeground3 }}>
                     {selectedDatasetDetails?.descriptionEn}
                   </Text>
-                  <div style={{ display: 'flex', gap: '12px', marginTop: '6px' }}>
+                  <div style={{ display: 'flex', gap: '12px', marginTop: '6px', flexWrap: 'wrap' }}>
                     <Badge appearance="tint" color="brand">ID: {selectedDatasetId}</Badge>
                     <Badge appearance="tint" color="severe">Interval: {selectedDatasetDetails?.dataPeriodEn}</Badge>
                     <Badge appearance="tint" color="success">Unit: {selectedDatasetDetails?.unitEn}</Badge>
+                    {selectedDatasetDetails?.contentGroupsEn?.map(cat => (
+                      <Badge key={cat} appearance="outline">{cat}</Badge>
+                    ))}
                   </div>
                 </div>
                 <Button
@@ -632,6 +635,15 @@ export default function App() {
                           <Text size={100} style={{ color: tokens.colorNeutralForeground4, display: 'block' }}>
                             ID: {d.id}
                           </Text>
+                          {d.contentGroupsEn && d.contentGroupsEn.length > 0 && (
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginTop: '2px', marginBottom: '6px' }}>
+                              {d.contentGroupsEn.map(cat => (
+                                <span key={cat} style={{ fontSize: '9px', background: tokens.colorNeutralBackground3, padding: '1px 5px', borderRadius: '4px', color: tokens.colorNeutralForeground3, border: `1px solid ${tokens.colorNeutralStroke2}`, whiteSpace: 'nowrap' }}>
+                                  {cat}
+                                </span>
+                              ))}
+                            </div>
+                          )}
                           <Text size={300} weight="semibold" style={{ overflow: 'hidden', textOverflow: 'ellipsis', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', lineHeight: 1.2 }}>
                             {d.nameEn}
                           </Text>
