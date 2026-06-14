@@ -226,6 +226,7 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+  const [selectedUnit, setSelectedUnit] = useState<string | null>(null);
   const [selectedDatasetId, setSelectedDatasetId] = useState<number | null>(null);
   const [loginKey, setLoginKey] = useState('');
   const [loginError, setLoginError] = useState<string | null>(null);
@@ -335,6 +336,19 @@ export default function App() {
     return Array.from(set).sort();
   }, [datasets]);
 
+  // Get units dynamically
+  const units = React.useMemo(() => {
+    if (!datasets) return [];
+    const set = new Set<string>();
+    datasets.forEach(d => {
+      if (d.unitEn) {
+        const cleaned = d.unitEn.trim();
+        if (cleaned) set.add(cleaned);
+      }
+    });
+    return Array.from(set).sort();
+  }, [datasets]);
+
   // Filter datasets
   const filteredDatasets = React.useMemo(() => {
     if (!datasets) return [];
@@ -351,9 +365,12 @@ export default function App() {
       const matchCategory =
         !selectedCategory || (d.contentGroupsEn && d.contentGroupsEn.includes(selectedCategory));
 
-      return matchSearch && matchCategory;
+      const matchUnit =
+        !selectedUnit || (d.unitEn && d.unitEn.trim() === selectedUnit);
+
+      return matchSearch && matchCategory && matchUnit;
     });
-  }, [datasets, searchQuery, selectedCategory]);
+  }, [datasets, searchQuery, selectedCategory, selectedUnit]);
 
   const selectedDatasetDetails = React.useMemo(() => {
     if (!datasets || !selectedDatasetId) return null;
@@ -474,6 +491,30 @@ export default function App() {
                   onClick={() => setSelectedCategory(cat)}
                 >
                   {cat}
+                </span>
+              ))}
+            </div>
+          </div>
+
+          {/* Units */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            <Text size={200} weight="semibold" style={{ textTransform: 'uppercase', letterSpacing: '0.05em', color: tokens.colorNeutralForeground3 }}>
+              Units
+            </Text>
+            <div className={styles.categoryList}>
+              <span
+                className={styles.pill + ' ' + (selectedUnit === null ? styles.pillActive : styles.pillInactive)}
+                onClick={() => setSelectedUnit(null)}
+              >
+                All
+              </span>
+              {units.map(unit => (
+                <span
+                  key={unit}
+                  className={styles.pill + ' ' + (selectedUnit === unit ? styles.pillActive : styles.pillInactive)}
+                  onClick={() => setSelectedUnit(unit)}
+                >
+                  {unit}
                 </span>
               ))}
             </div>
