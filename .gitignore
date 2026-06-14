@@ -1,0 +1,18 @@
+# Rust/Cargo
+/backend/target/
+/backend/Cargo.lock
+/backend/credentials.json
+/backend/active_datasets.json
+/backend/influx_config.json
+
+# Node/React
+/frontend/node_modules/
+/frontend/dist/
+/frontend/npm-debug.log*
+/frontend/yarn-debug.log*
+/frontend/yarn-error.log*
+/frontend/.eslintcache
+
+# OS Files
+.DS_Store
+Thumbs.db

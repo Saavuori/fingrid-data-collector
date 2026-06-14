@@ -1,0 +1,29 @@
+services:
+  fingrid-collector:
+    build: .
+    image: ghcr.io/saavuori/fingrid-data-collector:latest
+    container_name: fingrid-collector
+    restart: unless-stopped
+    ports:
+      - "3001:3000" # Maps port 3001 to Axum's 3000 to avoid conflicts with Helen on 3000
+    volumes:
+      - ./credentials.json:/app/credentials.json
+      - ./active_datasets.json:/app/active_datasets.json
+      - ./influx_config.json:/app/influx_config.json
+    labels:
+      - "com.centurylinklabs.watchtower.scope=fingrid-collector"
+
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower-fingrid
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_POLL_INTERVAL=300
+      - WATCHTOWER_SCOPE=fingrid-collector
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_LOG_LEVEL=info
+      - DOCKER_API_VERSION=1.45
+    labels:
+      - "com.centurylinklabs.watchtower.scope=fingrid-collector"
