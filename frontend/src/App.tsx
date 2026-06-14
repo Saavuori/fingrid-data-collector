@@ -1,6 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+
+// Configure Axios base URL based on dev vs production build
+axios.defaults.baseURL = import.meta.env.DEV 
+  ? (import.meta.env.VITE_API_URL || 'http://localhost:3001') 
+  : '';
 import {
   Button,
   Input,
@@ -228,7 +233,7 @@ export default function App() {
   const [version, setVersion] = useState('Unknown');
 
   useEffect(() => {
-    axios.get('/api/version')
+    axios.get('api/version')
       .then(res => setVersion(res.data.version))
       .catch(() => setVersion('Unknown'));
   }, []);
@@ -237,7 +242,7 @@ export default function App() {
   const { data: status, isLoading: statusLoading } = useQuery({
     queryKey: ['status'],
     queryFn: async () => {
-      const r = await axios.get('/api/status');
+      const r = await axios.get('api/status');
       return r.data as { logged_in: boolean; api_key?: string };
     },
   });
@@ -246,7 +251,7 @@ export default function App() {
   const { data: datasets, isLoading: datasetsLoading, error: datasetsError } = useQuery({
     queryKey: ['datasets'],
     queryFn: async () => {
-      const r = await axios.get('/api/datasets');
+      const r = await axios.get('api/datasets');
       return r.data.data as Dataset[];
     },
     enabled: !!status?.logged_in,
@@ -256,7 +261,7 @@ export default function App() {
   const { data: activeDatasetIds = [] } = useQuery({
     queryKey: ['activeDatasets'],
     queryFn: async () => {
-      const r = await axios.get('/api/datasets/active');
+      const r = await axios.get('api/datasets/active');
       return r.data as number[];
     },
     enabled: !!status?.logged_in,
@@ -269,7 +274,7 @@ export default function App() {
       if (!selectedDatasetId) return [];
       const stop = new Date().toISOString();
       const start = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
-      const r = await axios.get(`/api/datasets/${selectedDatasetId}/data`, {
+      const r = await axios.get(`api/datasets/${selectedDatasetId}/data`, {
         params: { startTime: start, endTime: stop }
       });
       
@@ -290,7 +295,7 @@ export default function App() {
       const nextActive = isActive
         ? activeDatasetIds.filter((x: number) => x !== id)
         : [...activeDatasetIds, id];
-      await axios.post('/api/datasets/active', nextActive);
+      await axios.post('api/datasets/active', nextActive);
       return nextActive;
     },
     onSuccess: (data) => {
@@ -305,7 +310,7 @@ export default function App() {
     setLoginLoading(true);
     setLoginError(null);
     try {
-      await axios.post('/api/login', { apiKey: loginKey });
+      await axios.post('api/login', { apiKey: loginKey });
       queryClient.invalidateQueries({ queryKey: ['status'] });
       queryClient.invalidateQueries({ queryKey: ['datasets'] });
     } catch (err: any) {

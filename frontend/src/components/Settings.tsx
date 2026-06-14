@@ -207,9 +207,9 @@ const Settings: React.FC<SettingsProps> = ({ onClose, onApiKeySaved }) => {
     const load = async () => {
       try {
         const [cfgRes, stRes, authRes] = await Promise.all([
-          axios.get('/api/influx/config'),
-          axios.get('/api/influx/status'),
-          axios.get('/api/status'),
+          axios.get('api/influx/config'),
+          axios.get('api/influx/status'),
+          axios.get('api/status'),
         ]);
         setCfg(cfgRes.data);
         setStatus(stRes.data);
@@ -224,7 +224,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, onApiKeySaved }) => {
 
     const id = setInterval(async () => {
       try {
-        const r = await axios.get('/api/influx/status');
+        const r = await axios.get('api/influx/status');
         setStatus(r.data);
       } catch {}
     }, 10_000);
@@ -236,17 +236,17 @@ const Settings: React.FC<SettingsProps> = ({ onClose, onApiKeySaved }) => {
     setSaveMsg(null);
     try {
       // Save Fingrid API Key first (verifies and persists)
-      await axios.post('/api/login', { apiKey });
+      await axios.post('api/login', { apiKey });
       
       // Save InfluxDB Config
-      await axios.post('/api/influx/config', cfg);
+      await axios.post('api/influx/config', cfg);
       
       setSaveMsg('Settings saved successfully');
       onApiKeySaved();
       queryClient.invalidateQueries({ queryKey: ['datasets'] });
       setTimeout(() => setSaveMsg(null), 3000);
       
-      const r = await axios.get('/api/influx/status');
+      const r = await axios.get('api/influx/status');
       setStatus(r.data);
     } catch (e: any) {
       const errorMsg = typeof e.response?.data === 'string'
@@ -261,7 +261,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, onApiKeySaved }) => {
   const handleTest = async () => {
     setLoadingTest(true); setTestResult(null);
     try {
-      const r = await axios.post('/api/influx/test', cfg);
+      const r = await axios.post('api/influx/test', cfg);
       setTestResult(r.data);
     } catch { setTestResult({ ok: false, message: 'Could not reach backend' }); }
     finally { setLoadingTest(false); }
@@ -270,9 +270,9 @@ const Settings: React.FC<SettingsProps> = ({ onClose, onApiKeySaved }) => {
   const handleSync = async () => {
     setLoadingSync(true); setSyncResult(null);
     try {
-      const r = await axios.post('/api/influx/sync');
+      const r = await axios.post('api/influx/sync');
       setSyncResult(r.data);
-      const sr = await axios.get('/api/influx/status');
+      const sr = await axios.get('api/influx/status');
       setStatus(sr.data);
     } catch { setSyncResult({ ok: false, points: 0, message: 'Sync request failed' }); }
     finally { setLoadingSync(false); }
