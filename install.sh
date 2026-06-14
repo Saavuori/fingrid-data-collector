@@ -13,6 +13,15 @@ cd "$INSTALL_DIR"
 echo "==> Downloading docker-compose.yml..."
 curl -fsSL "${BASE_URL}/docker-compose.yml" -o docker-compose.yml
 
+if docker network inspect web-proxy >/dev/null 2>&1; then
+  echo "==> External network 'web-proxy' found. Enabling reverse proxy network..."
+  sed 's/# networks:/networks:/g' docker-compose.yml | \
+  sed 's/#   - web-proxy/  - web-proxy/g' | \
+  sed 's/#   web-proxy:/  web-proxy:/g' | \
+  sed 's/#     external: true/    external: true/g' > docker-compose.tmp
+  mv docker-compose.tmp docker-compose.yml
+fi
+
 if [ ! -f credentials.json ]; then
   echo "==> Initializing empty credentials.json..."
   echo '{}' > credentials.json
