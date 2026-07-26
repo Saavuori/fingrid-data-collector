@@ -1,0 +1,18 @@
+{
+  "name": "FingridFlow",
+  "short_name": "FingridFlow",
+  "description": "Browse Fingrid Open Data variables and export them to InfluxDB.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#080B10",
+  "theme_color": "#080B10",
+  "icons": [
+    {
+      "src": "./favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

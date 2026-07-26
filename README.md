@@ -1,6 +1,6 @@
 # FingridFlow — Fingrid Open Data Collector
 
-A self-hosted tool that retrieves metrics from the new Fingrid Open Data API and exports them to InfluxDB. It features a beautiful, responsive dataset catalog browser and interactive live-preview charts.
+A self-hosted tool that retrieves metrics from the new Fingrid Open Data API and exports them to InfluxDB. It features a mobile-first dataset catalog browser and interactive live-preview charts.
 
 ![FingridFlow Dashboard](docs/images/dashboard.png)
 
@@ -8,8 +8,9 @@ A self-hosted tool that retrieves metrics from the new Fingrid Open Data API and
 
 ## Features
 
-- 📊 **Dynamic Catalog Browser** — Search and browse all 249+ Fingrid variables (wind power, solar, aFRR, frequency, nuclear output, etc.) with client-side searching and category filtering.
-- 📈 **Interactive Live Preview** — Click on any dataset to instantly load its last 24 hours of data in a sleek, animated area chart.
+- 📱 **Mobile-First UI** — Built for the phone first: a bottom tab bar, bottom-sheet filters and full-width charts, scaling up to a multi-column layout on tablets and desktops. Dark and light themes follow the system setting.
+- 📊 **Dynamic Catalog Browser** — Search and browse all 249+ Fingrid variables (wind power, solar, aFRR, frequency, nuclear output, etc.) with client-side searching plus category, unit and collection-state filters.
+- 📈 **Interactive Live Preview** — Open any variable to see its last 24 hours, 3 days or 7 days in an animated area chart, with latest / average / lowest / highest read out above it.
 - ⏱️ **Rate-Limit Resilient** — Designed defensively around Fingrid's 1 call per 2 seconds rate limit. The backend sequentially throttles queries and automatically retries requests on hitting `429 Too Many Requests`.
 - 📡 **InfluxDB Export** — Syncs your selected datasets to InfluxDB on a configurable interval.
 - 🐳 **Single Docker Container** — Compiled Axum backend + React frontend bundled together in a single container.
@@ -53,8 +54,8 @@ If you cloned the source code directly and want to build the Docker image locall
 
 1. Open the Web UI: `http://localhost:3001` (or your reverse proxy URL).
 2. Enter your Fingrid API Key (get one free by signing up at [data.fingrid.fi](https://data.fingrid.fi/)).
-3. Click the gear icon in the top-right to configure your InfluxDB URL, token, org, bucket, and sync interval.
-4. Toggle the switches on the datasets you want to collect and enable the Background Collector.
+3. Open **Settings** (the tab bar on a phone, the top navigation on a desktop) to configure your InfluxDB URL, token, org, bucket and sync interval, and to enable the Background Collector.
+4. In **Explore**, flip the switch on each variable you want to collect. The **Collect** tab lists everything queued for export and shows the sync status.
 
 ---
 
