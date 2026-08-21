@@ -198,7 +198,7 @@ async fn main() {
         .route("/api/version",          get(version_handler))
         .route("/api/datasets",         get(datasets_handler))
         .route("/api/datasets/active",  get(get_active_handler).post(post_active_handler))
-        .route("/api/datasets/:id/data",get(dataset_data_handler))
+        .route("/api/datasets/{id}/data", get(dataset_data_handler))
         .route("/api/influx/config",    get(get_influx_config_handler).post(post_influx_config_handler))
         .route("/api/influx/status",    get(get_influx_status_handler))
         .route("/api/influx/test",      post(influx_test_handler))
