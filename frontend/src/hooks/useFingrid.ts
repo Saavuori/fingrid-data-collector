@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import axios from 'axios';
-import type { Dataset } from '../types';
+import type { Dataset, InfluxStatus, SyncResult } from '../types';
 
 /** The full Fingrid variable catalog. The backend caches it after login, so
  *  this is cheap to hold for the whole session — 249+ entries, rarely changes. */
@@ -54,4 +54,36 @@ export function useActiveDatasets() {
     toggle: (id: number) => toggle.mutate(id),
     pendingId: toggle.isPending ? toggle.variables : undefined,
   };
+}
+
+const INFLUX_STATUS_KEY = ['influxStatus'];
+
+/** Background collector status, polled while a view that shows it is open.
+ *  A failed poll keeps the last known status. */
+export function useInfluxStatus() {
+  return useQuery({
+    queryKey: INFLUX_STATUS_KEY,
+    queryFn: async () => (await axios.get('api/influx/status')).data as InfluxStatus,
+    refetchInterval: 15_000,
+  });
+}
+
+/** Refreshes the collector status after something that changes it. */
+export function useRefreshInfluxStatus() {
+  const queryClient = useQueryClient();
+  return () => queryClient.invalidateQueries({ queryKey: INFLUX_STATUS_KEY });
+}
+
+/** "Sync now": runs one sync on the backend and returns its outcome. */
+export function useSyncNow() {
+  const refreshStatus = useRefreshInfluxStatus();
+  const mutation = useMutation({
+    mutationFn: async () => (await axios.post('api/influx/sync')).data as SyncResult,
+    onSettled: refreshStatus,
+  });
+  const result: SyncResult | null = mutation.isError
+    ? { ok: false, points: 0, message: 'Sync request failed' }
+    : mutation.data ?? null;
+
+  return { sync: () => mutation.mutate(), syncing: mutation.isPending, result };
 }

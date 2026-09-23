@@ -24,19 +24,9 @@ import {
 
 import { Card, Row, RowList, SegmentedControl } from './ui';
 import { errorText } from '../api';
-import type { InfluxConfig, InfluxStatus, SyncResult } from '../types';
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-const fmtDate = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : '—');
-
-const elapsed = (iso: string | null) => {
-  if (!iso) return '';
-  const diff = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
-  if (diff < 60) return `${diff}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  return `${Math.floor(diff / 3600)}h ago`;
-};
+import { elapsed, fmtDate } from '../format';
+import { useInfluxStatus, useRefreshInfluxStatus, useSyncNow } from '../hooks/useFingrid';
+import type { InfluxConfig } from '../types';
 
 // ── Styles ────────────────────────────────────────────────────────────────────
 
@@ -199,39 +189,28 @@ const SettingsView: React.FC<SettingsViewProps> = ({ version, theme, onThemeChan
     url: 'http://localhost:8086', token: '', org: '', bucket: 'fingrid',
     enabled: false, interval_minutes: 15,
   });
-  const [status, setStatus] = useState<InfluxStatus | null>(null);
+  const { data: status } = useInfluxStatus();
+  const refreshStatus = useRefreshInfluxStatus();
+  const { sync: handleSync, syncing: loadingSync, result: syncResult } = useSyncNow();
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
-  const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
   const [loadingTest, setLoadingTest] = useState(false);
-  const [loadingSync, setLoadingSync] = useState(false);
   const [loadingSave, setLoadingSave] = useState(false);
 
   useEffect(() => {
     const load = async () => {
       try {
-        const [cfgRes, stRes, authRes] = await Promise.all([
+        const [cfgRes, authRes] = await Promise.all([
           axios.get('api/influx/config'),
-          axios.get('api/influx/status'),
           axios.get('api/status'),
         ]);
         setCfg(cfgRes.data);
-        setStatus(stRes.data);
         if (authRes.data.api_key) setApiKey(authRes.data.api_key);
       } catch {
         /* backend not reachable yet — the form still renders */
       }
     };
     load();
-    const id = setInterval(async () => {
-      try {
-        const r = await axios.get('api/influx/status');
-        setStatus(r.data);
-      } catch {
-        /* transient — keep the last known status */
-      }
-    }, 15_000);
-    return () => clearInterval(id);
   }, []);
 
   const handleSave = async () => {
@@ -247,8 +226,7 @@ const SettingsView: React.FC<SettingsViewProps> = ({ version, theme, onThemeChan
       await axios.post('api/influx/config', cfg);
       setSaveMsg('Settings saved');
       setTimeout(() => setSaveMsg(null), 3000);
-      const r = await axios.get('api/influx/status');
-      setStatus(r.data);
+      refreshStatus();
     } catch (e) {
       setSaveMsg('Save failed: ' + errorText(e, 'unknown error'));
     } finally { setLoadingSave(false); }
@@ -261,17 +239,6 @@ const SettingsView: React.FC<SettingsViewProps> = ({ version, theme, onThemeChan
       setTestResult(r.data);
     } catch { setTestResult({ ok: false, message: 'Could not reach backend' }); }
     finally { setLoadingTest(false); }
-  };
-
-  const handleSync = async () => {
-    setLoadingSync(true); setSyncResult(null);
-    try {
-      const r = await axios.post('api/influx/sync');
-      setSyncResult(r.data);
-      const sr = await axios.get('api/influx/status');
-      setStatus(sr.data);
-    } catch { setSyncResult({ ok: false, points: 0, message: 'Sync request failed' }); }
-    finally { setLoadingSync(false); }
   };
 
   return (

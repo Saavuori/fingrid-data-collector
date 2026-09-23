@@ -1,5 +1,4 @@
-import React, { useEffect, useState } from 'react';
-import axios from 'axios';
+import React from 'react';
 import {
   Button,
   MessageBar,
@@ -20,24 +19,9 @@ import {
 } from '@fluentui/react-icons';
 
 import { usePalette } from '../theme';
-import { useActiveDatasets, useDatasets } from '../hooks/useFingrid';
-import type { InfluxStatus, SyncResult } from '../types';
+import { useActiveDatasets, useDatasets, useInfluxStatus, useSyncNow } from '../hooks/useFingrid';
+import { elapsed, fmtClock, fmtDate } from '../format';
 import { Card, EmptyState, Row, RowList, StatTile } from './ui';
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-const fmtDate = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : '—');
-
-const elapsed = (iso: string | null) => {
-  if (!iso) return '';
-  const diff = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
-  if (diff < 60) return `${diff}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  return `${Math.floor(diff / 3600)}h ago`;
-};
-
-const fmtClock = (iso: string | null) =>
-  iso ? new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—';
 
 // ── Styles ────────────────────────────────────────────────────────────────────
 
@@ -151,38 +135,8 @@ const CollectView: React.FC<{
   const { data: datasets, isLoading: datasetsLoading } = useDatasets();
   const active = useActiveDatasets();
 
-  const [status, setStatus] = useState<InfluxStatus | null>(null);
-  const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
-  const [syncing, setSyncing] = useState(false);
-
-  useEffect(() => {
-    const load = async () => {
-      try {
-        const res = await axios.get('api/influx/status');
-        setStatus(res.data);
-      } catch {
-        /* transient — keep the last known status */
-      }
-    };
-    load();
-    const id = setInterval(load, 15_000);
-    return () => clearInterval(id);
-  }, []);
-
-  const handleSync = async () => {
-    setSyncing(true);
-    setSyncResult(null);
-    try {
-      const res = await axios.post('api/influx/sync');
-      setSyncResult(res.data);
-      const st = await axios.get('api/influx/status');
-      setStatus(st.data);
-    } catch {
-      setSyncResult({ ok: false, points: 0, message: 'Sync request failed' });
-    } finally {
-      setSyncing(false);
-    }
-  };
+  const { data: status } = useInfluxStatus();
+  const { sync: handleSync, syncing, result: syncResult } = useSyncNow();
 
   // Keep the saved order so the list does not jump around between renders. An
   // ID with no catalog entry still gets a row — it is synced but unnamed.
