@@ -11,7 +11,6 @@ use fingrid_client::{FingridClient, Dataset};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tower_http::cors::CorsLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use chrono::{Utc, Duration as ChronoDuration};
 use std::path::PathBuf;
@@ -203,8 +202,10 @@ async fn main() {
         .route("/api/influx/status",    get(get_influx_status_handler))
         .route("/api/influx/test",      post(influx_test_handler))
         .route("/api/influx/sync",      post(influx_sync_handler))
+        // No CORS layer: the UI is served from this same origin (and the Vite
+        // dev server proxies /api). A permissive one let any web page the user
+        // opened read /api/status and /api/influx/config, keys included.
         .fallback_service(tower_http::services::ServeDir::new("dist"))
-        .layer(CorsLayer::permissive())
         .with_state(shared_state);
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());

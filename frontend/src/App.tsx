@@ -14,10 +14,9 @@ import { useActiveDatasets } from './hooks/useFingrid';
 import { PALETTES, PaletteProvider, applyPaletteToDocument, darkTheme, lightTheme } from './theme';
 import type { AuthStatus, TabKey } from './types';
 
-// Configure Axios base URL based on dev vs production build
-axios.defaults.baseURL = import.meta.env.DEV
-  ? (import.meta.env.VITE_API_URL || 'http://localhost:3001')
-  : '';
+// API paths are relative ('api/...') and always same-origin: that keeps the app
+// working under a reverse-proxy subpath, and in development the Vite server
+// proxies /api to the backend (vite.config.ts), which sends no CORS headers.
 
 const useStyles = makeStyles({
   app: {
