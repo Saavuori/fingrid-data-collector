@@ -15,13 +15,15 @@ export function useDatasets() {
   });
 }
 
+const ACTIVE_KEY = ['activeDatasets'];
+
 /** The IDs queued for InfluxDB export, plus a toggle that keeps the whole list
  *  in sync — the backend stores the selection as one array, not per dataset. */
 export function useActiveDatasets() {
   const queryClient = useQueryClient();
 
   const query = useQuery({
-    queryKey: ['activeDatasets'],
+    queryKey: ACTIVE_KEY,
     queryFn: async () => {
       const res = await axios.get('api/datasets/active');
       return (res.data ?? []) as number[];
@@ -31,12 +33,18 @@ export function useActiveDatasets() {
   const ids = query.data ?? [];
 
   const toggle = useMutation({
+    // Because each save posts the whole list, toggles run one at a time and
+    // each starts from the list the previous one saved. Building the list
+    // from the render's `ids` let two quick toggles each post a list that
+    // was missing the other's change.
+    scope: { id: 'activeDatasets' },
     mutationFn: async (id: number) => {
-      const next = ids.includes(id) ? ids.filter(x => x !== id) : [...ids, id];
+      const current = queryClient.getQueryData<number[]>(ACTIVE_KEY) ?? [];
+      const next = current.includes(id) ? current.filter(x => x !== id) : [...current, id];
       await axios.post('api/datasets/active', next);
       return next;
     },
-    onSuccess: next => queryClient.setQueryData(['activeDatasets'], next),
+    onSuccess: next => queryClient.setQueryData(ACTIVE_KEY, next),
   });
 
   return {
