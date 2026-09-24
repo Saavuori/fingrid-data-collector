@@ -11,9 +11,8 @@ use fingrid_client::{FingridClient, Dataset};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tower_http::cors::CorsLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use chrono::{Utc, Duration as ChronoDuration};
+use chrono::{DateTime, Utc, Duration as ChronoDuration};
 use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
@@ -23,9 +22,17 @@ use std::path::PathBuf;
 struct AppState {
     api_key:          Option<String>,
     datasets_cache:   Option<Vec<Dataset>>,
-    influx_last_sync: Option<chrono::DateTime<Utc>>,
+    /// Last sync that wrote to InfluxDB.
+    influx_last_sync: Option<DateTime<Utc>>,
+    /// Last sync started, successful or not — the schedule runs from this, so
+    /// a failing sync waits out the interval instead of retrying every tick.
+    influx_last_attempt: Option<DateTime<Utc>>,
     influx_error:     Option<String>,
 }
+
+/// Held for the whole of a sync, so a manual sync and the background one
+/// never query Fingrid at the same time and break its rate limit.
+static SYNC_LOCK: Mutex<()> = Mutex::const_new(());
 
 // ---------------------------------------------------------------------------
 // Request / Response structures
@@ -124,12 +131,15 @@ async fn main() {
     let mut api_key = None;
     let mut datasets_cache = None;
 
-    // Load API key from file on startup
+    // Load API key from file on startup. Only a key Fingrid actually rejects is
+    // dropped: after a reboot the network or Fingrid may not be up yet, and
+    // treating that as a bad key would stop the collector until someone
+    // logged in again.
     if let Some(creds) = load_credentials() {
         tracing::info!("Found saved Fingrid API Key, validating...");
         if let Ok(client) = FingridClient::new(&creds.api_key) {
             match client.verify_api_key().await {
-                Ok(()) => {
+                Ok(true) => {
                     tracing::info!("API Key successfully validated");
                     api_key = Some(creds.api_key.clone());
                     // Pre-fetch dataset catalog to cache
@@ -141,7 +151,11 @@ async fn main() {
                         Err(e) => tracing::warn!("Failed to pre-fetch datasets: {}", e),
                     }
                 }
-                Err(e) => tracing::warn!("Saved API Key is invalid: {}", e),
+                Ok(false) => tracing::warn!("Saved API Key was rejected by Fingrid"),
+                Err(e) => {
+                    tracing::warn!("Could not validate saved API Key, keeping it: {}", e);
+                    api_key = Some(creds.api_key.clone());
+                }
             }
         }
     }
@@ -149,8 +163,9 @@ async fn main() {
     let shared_state = Arc::new(Mutex::new(AppState {
         api_key,
         datasets_cache,
-        influx_last_sync: None,
-        influx_error:     None,
+        influx_last_sync:    None,
+        influx_last_attempt: None,
+        influx_error:        None,
     }));
 
     // ── Background Sync Loop ──────────────────────────────────────────────────
@@ -164,29 +179,17 @@ async fn main() {
                 let cfg = influx::load_config();
                 if !cfg.enabled { continue; }
 
-                // Determine if it is time to sync
                 let should_sync = {
                     let st = s.lock().await;
-                    st.influx_last_sync
-                        .map(|t| Utc::now() - t > ChronoDuration::minutes(cfg.interval_minutes as i64))
-                        .unwrap_or(true)
+                    sync_due(st.influx_last_attempt, cfg.interval_minutes, Utc::now())
                 };
 
                 if !should_sync { continue; }
 
                 tracing::info!("Background Collector: Starting Fingrid sync...");
-                let result = run_sync_all_datasets(&s, &cfg).await;
-                let mut st = s.lock().await;
-                match result {
-                    Ok(pts) => {
-                        st.influx_last_sync = Some(Utc::now());
-                        st.influx_error     = None;
-                        tracing::info!("Background Collector: Wrote {} points to InfluxDB", pts);
-                    }
-                    Err(e) => {
-                        st.influx_error = Some(e.to_string());
-                        tracing::error!("Background Collector Error: {}", e);
-                    }
+                match run_sync_all_datasets(&s, &cfg).await {
+                    Ok(pts) => tracing::info!("Background Collector: Wrote {} points to InfluxDB", pts),
+                    Err(e)  => tracing::error!("Background Collector Error: {}", e),
                 }
             }
         });
@@ -203,8 +206,10 @@ async fn main() {
         .route("/api/influx/status",    get(get_influx_status_handler))
         .route("/api/influx/test",      post(influx_test_handler))
         .route("/api/influx/sync",      post(influx_sync_handler))
+        // No CORS layer: the UI is served from this same origin (and the Vite
+        // dev server proxies /api). A permissive one let any web page the user
+        // opened read /api/status and /api/influx/config, keys included.
         .fallback_service(tower_http::services::ServeDir::new("dist"))
-        .layer(CorsLayer::permissive())
         .with_state(shared_state);
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());
@@ -218,14 +223,58 @@ async fn main() {
 // Sync Logic (Fingrid to InfluxDB)
 // ---------------------------------------------------------------------------
 
+/// Whether the background collector should start a sync now.
+fn sync_due(last_attempt: Option<DateTime<Utc>>, interval_minutes: u64, now: DateTime<Utc>) -> bool {
+    last_attempt.is_none_or(|t| now - t >= ChronoDuration::minutes(interval_minutes.max(1) as i64))
+}
+
+/// How far back each sync queries. Two hours catches Fingrid's late-reported
+/// values; a longer interval widens it so consecutive windows still overlap
+/// rather than leaving a gap between syncs.
+fn sync_window(interval_minutes: u64) -> ChronoDuration {
+    ChronoDuration::hours(2).max(ChronoDuration::minutes(interval_minutes as i64 + 60))
+}
+
+/// Runs one sync and records its outcome for `/api/influx/status`. Both the
+/// background loop and the manual "Sync now" go through here.
 async fn run_sync_all_datasets(
     state: &Arc<Mutex<AppState>>,
     cfg:   &influx::InfluxConfig,
 ) -> anyhow::Result<usize> {
-    let api_key = {
-        let st = state.lock().await;
-        st.api_key.clone().ok_or_else(|| anyhow::anyhow!("Fingrid API Key not configured"))?
-    };
+    let _running = SYNC_LOCK.lock().await;
+    state.lock().await.influx_last_attempt = Some(Utc::now());
+
+    let result = sync_all_datasets(state, cfg).await;
+
+    let mut st = state.lock().await;
+    match &result {
+        Ok(_) => {
+            st.influx_last_sync = Some(Utc::now());
+            st.influx_error     = None;
+        }
+        Err(e) => st.influx_error = Some(e.to_string()),
+    }
+    result
+}
+
+/// The dataset catalog, fetched from Fingrid on first use and cached. The
+/// state lock is not held across the request, so a slow Fingrid does not
+/// stall every other route.
+async fn cached_datasets(state: &Arc<Mutex<AppState>>, api_key: &str) -> anyhow::Result<Vec<Dataset>> {
+    if let Some(list) = state.lock().await.datasets_cache.clone() {
+        return Ok(list);
+    }
+    let list = FingridClient::new(api_key)?.get_datasets().await?;
+    state.lock().await.datasets_cache = Some(list.clone());
+    Ok(list)
+}
+
+async fn sync_all_datasets(
+    state: &Arc<Mutex<AppState>>,
+    cfg:   &influx::InfluxConfig,
+) -> anyhow::Result<usize> {
+    let api_key = state.lock().await.api_key.clone()
+        .ok_or_else(|| anyhow::anyhow!("Fingrid API Key not configured"))?;
 
     let active_ids = load_active_datasets();
     if active_ids.is_empty() {
@@ -234,24 +283,12 @@ async fn run_sync_all_datasets(
     }
 
     // Load datasets list (needed to get the unit and English name for line protocol tags)
-    let datasets = {
-        let mut st = state.lock().await;
-        if let Some(ref list) = st.datasets_cache {
-            list.clone()
-        } else {
-            // If cache is empty, fetch it now
-            let client = FingridClient::new(&api_key)?;
-            let list = client.get_datasets().await?;
-            st.datasets_cache = Some(list.clone());
-            list
-        }
-    };
+    let datasets = cached_datasets(state, &api_key).await?;
 
     let client = FingridClient::new(&api_key)?;
-    
-    // Set query window: last 2 hours to avoid missing delayed reporting data
+
     let stop_time = Utc::now();
-    let start_time = stop_time - ChronoDuration::hours(2);
+    let start_time = stop_time - sync_window(cfg.interval_minutes);
 
     let stop_str = stop_time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let start_str = start_time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -333,8 +370,11 @@ async fn login_handler(
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     // Verify key by making a request to Fingrid
-    client.verify_api_key().await
-        .map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))?;
+    match client.verify_api_key().await {
+        Ok(true) => {}
+        Ok(false) => return Err((StatusCode::UNAUTHORIZED, "Fingrid rejected the API key".to_string())),
+        Err(e) => return Err((StatusCode::BAD_GATEWAY, e.to_string())),
+    }
 
     // Try to retrieve and cache the full datasets list
     let datasets = match client.get_datasets().await {
@@ -359,25 +399,18 @@ async fn login_handler(
 async fn datasets_handler(
     State(state): State<Arc<Mutex<AppState>>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let mut state = state.lock().await;
-    let api_key = state.api_key.clone()
-        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Not logged in".to_string()))?;
-
-    if let Some(ref list) = state.datasets_cache {
-        return Ok(Json(serde_json::json!({ "data": list })));
-    }
-
-    // If cache is empty, fetch catalog from Fingrid
-    let client = FingridClient::new(&api_key)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    match client.get_datasets().await {
-        Ok(list) => {
-            state.datasets_cache = Some(list.clone());
-            Ok(Json(serde_json::json!({ "data": list })))
-        }
+    let api_key = logged_in_key(&state).await?;
+    match cached_datasets(&state, &api_key).await {
+        Ok(list) => Ok(Json(serde_json::json!({ "data": list }))),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
     }
+}
+
+/// The saved API key, or 401 for the routes that need one. Cloned out so the
+/// state lock is released before any Fingrid request.
+async fn logged_in_key(state: &Arc<Mutex<AppState>>) -> Result<String, (StatusCode, String)> {
+    state.lock().await.api_key.clone()
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Not logged in".to_string()))
 }
 
 async fn get_active_handler() -> Json<Vec<i32>> {
@@ -396,10 +429,7 @@ async fn dataset_data_handler(
     Path(id): Path<i32>,
     Query(params): Query<DataQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let state = state.lock().await;
-    let api_key = state.api_key.clone()
-        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Not logged in".to_string()))?;
-
+    let api_key = logged_in_key(&state).await?;
     let client = FingridClient::new(&api_key)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -429,8 +459,8 @@ async fn get_influx_status_handler(
 ) -> Json<InfluxStatusResponse> {
     let state = state.lock().await;
     let cfg   = influx::load_config();
-    let next  = state.influx_last_sync.map(|t| {
-        t + ChronoDuration::minutes(cfg.interval_minutes as i64)
+    let next  = state.influx_last_attempt.map(|t| {
+        t + ChronoDuration::minutes(cfg.interval_minutes.max(1) as i64)
     });
     Json(InfluxStatusResponse {
         enabled:   cfg.enabled,
@@ -461,20 +491,46 @@ async fn influx_sync_handler(
     }
 
     match run_sync_all_datasets(&state, &cfg).await {
-        Ok(pts) => {
-            let mut st = state.lock().await;
-            st.influx_last_sync = Some(Utc::now());
-            st.influx_error     = None;
-            Json(InfluxSyncResponse {
-                ok: true,
-                points: pts,
-                message: format!("Manual sync completed. Wrote {} data points", pts)
-            })
-        }
-        Err(e) => {
-            let mut st = state.lock().await;
-            st.influx_error = Some(e.to_string());
-            Json(InfluxSyncResponse { ok: false, points: 0, message: e.to_string() })
+        Ok(pts) => Json(InfluxSyncResponse {
+            ok: true,
+            points: pts,
+            message: format!("Manual sync completed. Wrote {} data points", pts)
+        }),
+        Err(e) => Json(InfluxSyncResponse { ok: false, points: 0, message: e.to_string() }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(minute: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(1_781_391_600 + minute * 60, 0).unwrap()
+    }
+
+    #[test]
+    fn first_sync_is_due_immediately() {
+        assert!(sync_due(None, 15, at(0)));
+    }
+
+    #[test]
+    fn sync_waits_for_the_interval_after_any_attempt() {
+        assert!(!sync_due(Some(at(0)), 15, at(14)));
+        assert!(sync_due(Some(at(0)), 15, at(15)));
+    }
+
+    #[test]
+    fn zero_interval_is_treated_as_one_minute() {
+        assert!(!sync_due(Some(at(0)), 0, at(0)));
+        assert!(sync_due(Some(at(0)), 0, at(1)));
+    }
+
+    #[test]
+    fn sync_window_overlaps_consecutive_syncs() {
+        assert_eq!(sync_window(15), ChronoDuration::hours(2));
+        assert_eq!(sync_window(180), ChronoDuration::hours(4));
+        for interval in [1, 15, 60, 120, 240, 1440] {
+            assert!(sync_window(interval) > ChronoDuration::minutes(interval as i64));
         }
     }
 }

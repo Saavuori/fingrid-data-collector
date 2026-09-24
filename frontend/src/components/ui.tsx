@@ -23,26 +23,6 @@ const useStyles = makeStyles({
     },
   },
 
-  sectionHeader: {
-    display: 'flex',
-    alignItems: 'baseline',
-    justifyContent: 'space-between',
-    gap: '12px',
-    padding: '0 4px 12px',
-  },
-  sectionTitle: {
-    fontSize: '18px',
-    fontWeight: 650,
-    letterSpacing: '-0.02em',
-    lineHeight: 1.2,
-  },
-  sectionSubtitle: {
-    display: 'block',
-    marginTop: '2px',
-    fontSize: '13px',
-    color: 'var(--text-muted)',
-  },
-
   segmented: {
     display: 'flex',
     gap: '2px',
@@ -321,34 +301,11 @@ export const Card: React.FC<{
   children: React.ReactNode;
   padded?: boolean;
   className?: string;
-  onClick?: () => void;
-}> = ({ children, padded = true, className, onClick }) => {
+}> = ({ children, padded = true, className }) => {
   const styles = useStyles();
   return (
-    <div
-      className={mergeClasses(styles.card, padded && styles.cardPadded, className)}
-      onClick={onClick}
-    >
+    <div className={mergeClasses(styles.card, padded && styles.cardPadded, className)}>
       {children}
-    </div>
-  );
-};
-
-// ── Section header ───────────────────────────────────────────────────────────
-
-export const SectionHeader: React.FC<{
-  title: string;
-  subtitle?: string;
-  action?: React.ReactNode;
-}> = ({ title, subtitle, action }) => {
-  const styles = useStyles();
-  return (
-    <div className={styles.sectionHeader}>
-      <div>
-        <h2 className={styles.sectionTitle}>{title}</h2>
-        {subtitle && <span className={styles.sectionSubtitle}>{subtitle}</span>}
-      </div>
-      {action}
     </div>
   );
 };
@@ -427,26 +384,22 @@ export const Chip: React.FC<{
   onClick?: () => void;
   /** Renders as a small non-interactive label rather than a filter control. */
   readOnly?: boolean;
-  tint?: string;
-  accent?: string;
-}> = ({ children, active, onClick, readOnly, tint, accent }) => {
+}> = ({ children, active, onClick, readOnly }) => {
   const styles = useStyles();
   const className = mergeClasses(
     styles.chip,
     active && styles.chipActive,
     readOnly && styles.chipStatic,
   );
-  const style = tint ? { background: tint, borderColor: accent, color: accent } : undefined;
-
   if (readOnly) {
     return (
-      <span className={className} style={style}>
+      <span className={className}>
         {children}
       </span>
     );
   }
   return (
-    <button type="button" className={className} style={style} onClick={onClick} aria-pressed={active}>
+    <button type="button" className={className} onClick={onClick} aria-pressed={active}>
       {children}
     </button>
   );
@@ -491,19 +444,13 @@ export const RowList: React.FC<{ children: React.ReactNode }> = ({ children }) =
 export const Row: React.FC<{
   label: React.ReactNode;
   value: React.ReactNode;
-  valueColor?: string;
   mono?: boolean;
-}> = ({ label, value, valueColor, mono }) => {
+}> = ({ label, value, mono }) => {
   const styles = useStyles();
   return (
     <div className={styles.row}>
       <span className={styles.rowLabel}>{label}</span>
-      <span
-        className={mergeClasses(styles.rowValue, mono && 'tnum')}
-        style={{ color: valueColor }}
-      >
-        {value}
-      </span>
+      <span className={mergeClasses(styles.rowValue, mono && 'tnum')}>{value}</span>
     </div>
   );
 };
