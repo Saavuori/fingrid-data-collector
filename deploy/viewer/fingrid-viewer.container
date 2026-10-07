@@ -22,6 +22,10 @@ PublishPort=127.0.0.1:3010:3000
 
 # The Fingrid API key, from a podman secret: never in this file or the image.
 Secret=fingrid_api_key,type=env,target=FINGRID_API_KEY
+# Optional ENTSO-E token for day-ahead prices. install.sh enables this line
+# when the podman secret entsoe_api_key exists; a missing secret would stop
+# the container from starting, so it stays commented out otherwise.
+#Secret=entsoe_api_key,type=env,target=ENTSOE_API_KEY
 Environment=RUST_LOG=info
 # Fingrid allows 10 000 calls a day per key; leave headroom for other uses.
 Environment=FINGRID_DAILY_LIMIT=8000

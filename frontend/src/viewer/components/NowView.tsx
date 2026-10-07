@@ -13,7 +13,7 @@ import {
 import { usePalette, type Palette } from '../../theme';
 import { Card, EmptyState } from '../../components/ui';
 import { errorText } from '../../api';
-import { useDashboard, latestOf, seriesOf, type DashboardData, type Point } from '../api';
+import { useDashboard, usePrices, latestOf, seriesOf, type DashboardData, type Point, type PriceData } from '../api';
 import { BORDERS, ID, MIX, seriesColor } from '../datasets';
 import { useI18n } from '../i18n';
 import { href } from '../router';
@@ -47,6 +47,59 @@ function valueAt(points: Point[], t: number): number | undefined {
 
 const upTo = (points: Point[], t: number) => points.filter(p => p[0] <= t);
 const from = (points: Point[], t: number) => points.filter(p => p[0] >= t);
+
+/** Local midnight `days` days after the one starting the day `t` falls in. */
+function midnight(t: number, days = 0): number {
+  const d = new Date(t);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + days);
+  return d.getTime();
+}
+
+/** EUR/MWh as published, in the c/kWh households know. */
+const toCents = (eurPerMwh: number) => eurPerMwh / 10;
+
+interface DayStats {
+  avg: number;
+  min: Point;
+  max: Point;
+}
+
+function dayStats(points: Point[]): DayStats | undefined {
+  if (!points.length) return undefined;
+  let min = points[0];
+  let max = points[0];
+  let sum = 0;
+  for (const p of points) {
+    if (p[1] < min[1]) min = p;
+    if (p[1] > max[1]) max = p;
+    sum += p[1];
+  }
+  return { avg: sum / points.length, min, max };
+}
+
+/** Today's and tomorrow's prices in c/kWh, by the visitor's calendar. */
+function buildPrices(d: PriceData, now: number) {
+  const step = (d.resolutionMinutes || 60) * 60 * 1000;
+  const today = midnight(now);
+  const tomorrow = midnight(now, 1);
+  const dayAfter = midnight(now, 2);
+  const cents: Point[] = d.points.map(([t, v]) => [t, toCents(v)]);
+  const inDay = (a: number, b: number) => cents.filter(([t]) => t >= a && t < b);
+  const shown = inDay(today, dayAfter);
+  // The last price holds to the end of its period; close the final step.
+  const last = shown[shown.length - 1];
+  const chart: Point[] = last ? [...shown, [last[0] + step, last[1]]] : [];
+  const current = cents.find(([t]) => t <= now && now < t + step);
+  return {
+    current: current?.[1],
+    today: dayStats(inDay(today, tomorrow)),
+    tomorrow: dayStats(inDay(tomorrow, dayAfter)),
+    chart,
+  };
+}
+
+type PriceView = ReturnType<typeof buildPrices>;
 
 const useStyles = makeStyles({
   view: {
@@ -123,15 +176,27 @@ const useStyles = makeStyles({
     display: 'grid',
     gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
     gap: '10px',
-    // Ranges rather than stacked min-widths: Griffel does not guarantee the
-    // order media rules land in, so overlapping ones can override each other.
+    '@media (min-width: 768px)': {
+      gap: '16px',
+    },
+  },
+  // Ranges rather than stacked min-widths: Griffel does not guarantee the
+  // order media rules land in, so overlapping ones can override each other.
+  kpisFive: {
     '@media (min-width: 768px) and (max-width: 1099px)': {
       gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
-      gap: '16px',
     },
     '@media (min-width: 1100px)': {
       gridTemplateColumns: 'repeat(5, minmax(0, 1fr))',
-      gap: '16px',
+    },
+  },
+  // Six in a row need a little more width before the values crowd.
+  kpisSix: {
+    '@media (min-width: 768px) and (max-width: 1199px)': {
+      gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+    },
+    '@media (min-width: 1200px)': {
+      gridTemplateColumns: 'repeat(6, minmax(0, 1fr))',
     },
   },
   kpi: {
@@ -311,6 +376,31 @@ const useStyles = makeStyles({
     justifyContent: 'center',
     padding: '80px 0',
   },
+
+  priceStats: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+    gap: '14px 16px',
+    '@media (min-width: 768px)': {
+      gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
+    },
+  },
+  priceStat: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '2px',
+    minWidth: 0,
+  },
+  priceStatValue: {
+    fontSize: '20px',
+    fontWeight: 680,
+    letterSpacing: '-0.02em',
+    whiteSpace: 'nowrap',
+  },
+  priceNote: {
+    fontSize: '13px',
+    color: 'var(--text-muted)',
+  },
 });
 
 // ── Pieces ───────────────────────────────────────────────────────────────────
@@ -322,12 +412,13 @@ const Kpi: React.FC<{
   hint?: string;
   spark: Point[];
   color: string;
-  to: string;
+  /** The dataset page it opens; without one the tile is not a link. */
+  to?: string;
   wide?: boolean;
 }> = ({ label, value, unit, hint, spark, color, to, wide }) => {
   const styles = useStyles();
-  return (
-    <a className={mergeClasses(styles.kpi, wide && styles.kpiWide)} href={to}>
+  const body = (
+    <>
       <span className={styles.kpiLabel}>{label}</span>
       <span className={styles.kpiValue}>
         {value}
@@ -337,7 +428,15 @@ const Kpi: React.FC<{
       <div className={styles.kpiSpark}>
         <Sparkline points={spark} color={color} />
       </div>
+    </>
+  );
+  const className = mergeClasses(styles.kpi, wide && styles.kpiWide);
+  return to ? (
+    <a className={className} href={to}>
+      {body}
     </a>
+  ) : (
+    <div className={className}>{body}</div>
   );
 };
 
@@ -500,6 +599,69 @@ const MixCard: React.FC<{ d: DashboardData; now: number }> = ({ d, now }) => {
   );
 };
 
+// ── Day-ahead price ──────────────────────────────────────────────────────────
+
+const PriceStat: React.FC<{ label: string; value: string; hint?: string }> = ({ label, value, hint }) => {
+  const styles = useStyles();
+  return (
+    <div className={styles.priceStat}>
+      <span className={styles.kpiLabel}>{label}</span>
+      <span className={mergeClasses(styles.priceStatValue, 'tnum')}>{value}</span>
+      <span className={mergeClasses(styles.kpiHint, 'tnum')}>{hint || ' '}</span>
+    </div>
+  );
+};
+
+const PriceCard: React.FC<{ prices: PriceView | undefined; stale: boolean; failed: boolean; now: number }> = ({
+  prices,
+  stale,
+  failed,
+  now,
+}) => {
+  const styles = useStyles();
+  const palette = usePalette();
+  const { t, locale } = useI18n();
+  const c = (x: number | undefined) => `${x == null ? '—' : formatValue(x, 2, locale)} c/kWh`;
+  const at = (p: Point | undefined) => (p ? fmtClock(p[0], locale) : undefined);
+  const negative = prices?.chart.some(p => p[1] < 0);
+
+  return (
+    <Card className={styles.wide}>
+      <div className={styles.cardInner}>
+        <CardHead title={t.priceTitle} subtitle={t.priceSubtitle} />
+        {!prices ? (
+          failed ? (
+            <span className={styles.priceNote}>{t.priceFailed}</span>
+          ) : (
+            <Spinner size="tiny" />
+          )
+        ) : (
+          <>
+            {stale && <span className={styles.priceNote}>{t.priceStale}</span>}
+            <div className={styles.priceStats}>
+              <PriceStat label={t.priceNow} value={c(prices.current)} />
+              <PriceStat label={t.priceTodayAvg} value={c(prices.today?.avg)} />
+              <PriceStat label={t.priceTodayLow} value={c(prices.today?.min[1])} hint={at(prices.today?.min)} />
+              <PriceStat label={t.priceTodayHigh} value={c(prices.today?.max[1])} hint={at(prices.today?.max)} />
+            </div>
+            <TimeChart
+              series={[{ key: 'price', label: t.price, color: palette.accent, points: prices.chart, step: true }]}
+              unit="c/kWh"
+              digits={2}
+              now={now}
+              reference={negative ? 0 : undefined}
+              ariaLabel={t.priceTitle}
+            />
+            <span className={styles.priceNote}>
+              {t.priceTomorrowAvg}: {prices.tomorrow ? c(prices.tomorrow.avg) : t.priceTomorrowPending}
+            </span>
+          </>
+        )}
+      </div>
+    </Card>
+  );
+};
+
 // ── View ─────────────────────────────────────────────────────────────────────
 
 const NowView: React.FC = () => {
@@ -507,6 +669,15 @@ const NowView: React.FC = () => {
   const palette = usePalette();
   const { t, locale } = useI18n();
   const { data, isLoading, isError, error, refetch } = useDashboard();
+  const priceQuery = usePrices();
+  const priceData = priceQuery.data;
+  // Null once the server says prices are not configured: no tile, no card.
+  const showPrices = priceData !== null;
+  const generatedAt = data?.data.generatedAt;
+  const prices = useMemo(
+    () => (priceData && generatedAt ? buildPrices(priceData.data, new Date(generatedAt).getTime()) : undefined),
+    [priceData, generatedAt],
+  );
 
   if (isLoading) {
     return (
@@ -583,7 +754,7 @@ const NowView: React.FC = () => {
         </div>
       )}
 
-      <div className={styles.kpis}>
+      <div className={mergeClasses(styles.kpis, showPrices ? styles.kpisSix : styles.kpisFive)}>
         <Kpi
           label={t.consumption}
           value={mw(consumption)}
@@ -635,8 +806,22 @@ const NowView: React.FC = () => {
           spark={day(ID.co2Consumption)}
           color={palette.accent}
           to={href(`/d/${ID.co2Consumption}`)}
-          wide
+          wide={!showPrices}
         />
+        {showPrices && (
+          <Kpi
+            label={t.price}
+            value={prices?.current == null ? '—' : formatValue(prices.current, 2, locale)}
+            unit="c/kWh"
+            hint={
+              prices?.today
+                ? t.priceRange(formatValue(prices.today.min[1], 2, locale), formatValue(prices.today.max[1], 2, locale))
+                : undefined
+            }
+            spark={prices?.chart ?? []}
+            color={palette.accent}
+          />
+        )}
       </div>
 
       <div className={styles.grid}>
@@ -649,6 +834,10 @@ const NowView: React.FC = () => {
             <Legend items={balance.map(s => ({ label: s.label, color: s.color, dashed: s.dashed }))} />
           </div>
         </Card>
+
+        {showPrices && (
+          <PriceCard prices={prices} stale={!!priceData?.stale} failed={priceQuery.isError} now={now} />
+        )}
 
         <Card className={styles.tallCard}>
           <div className={styles.cardInner}>

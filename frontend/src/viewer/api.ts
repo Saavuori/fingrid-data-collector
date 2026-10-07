@@ -74,5 +74,37 @@ export function useSeries(id: number, range: RangeKey) {
   });
 }
 
+/** Finland's day-ahead market prices, from ENTSO-E. */
+export interface PriceData {
+  area: string;
+  start: string;
+  end: string;
+  currency: string;
+  unit: string;
+  resolutionMinutes: number;
+  /** `[epoch ms, EUR/MWh]`, each price holding until the next. */
+  points: Point[];
+}
+
+/** Null when the server has no ENTSO-E token: the price card is left out. */
+export function usePrices() {
+  return useQuery({
+    queryKey: ['prices'],
+    queryFn: async () => {
+      try {
+        const res = await axios.get<PriceData>('api/prices', { timeout: 60_000 });
+        return { data: res.data, stale: res.headers['x-data-stale'] === '1' };
+      } catch (err) {
+        if (axios.isAxiosError(err) && err.response?.status === 404) return null;
+        throw err;
+      }
+    },
+    refetchInterval: 5 * 60_000,
+    retry: 3,
+    retryDelay: attempt => Math.min(2000 * 2 ** attempt, 20_000),
+    placeholderData: keepPreviousData,
+  });
+}
+
 export const seriesOf = (d: DashboardData | undefined, id: number): Point[] => d?.series[String(id)] ?? [];
 export const latestOf = (d: DashboardData | undefined, id: number) => d?.latest[String(id)];

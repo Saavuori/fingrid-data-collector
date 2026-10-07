@@ -10,6 +10,8 @@ services:
     environment:
       FINGRID_API_KEY: ${FINGRID_API_KEY:?set FINGRID_API_KEY in .env}
       FINGRID_DAILY_LIMIT: "8000"
+      # Optional: an ENTSO-E token adds day-ahead prices to the front page.
+      ENTSOE_API_KEY: ${ENTSOE_API_KEY:-}
     read_only: true
     security_opt:
       - no-new-privileges:true

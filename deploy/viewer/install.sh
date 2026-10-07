@@ -4,7 +4,8 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/Saavuori/fingrid-data-collector/main/deploy/viewer/install.sh | bash
 #
-# It asks for the Fingrid API key once and keeps it in a podman secret.
+# It asks for the Fingrid API key once, and optionally an ENTSO-E token for
+# day-ahead prices, and keeps them in podman secrets.
 set -euo pipefail
 
 REPO="Saavuori/fingrid-data-collector"
@@ -27,8 +28,24 @@ else
   echo "==> Stored the key as podman secret 'fingrid_api_key'"
 fi
 
+if podman secret inspect entsoe_api_key >/dev/null 2>&1; then
+  echo "==> ENTSO-E token secret already exists (podman secret rm entsoe_api_key to replace it)"
+else
+  read -rsp "ENTSO-E token for day-ahead prices (optional, Enter to skip): " token </dev/tty
+  echo
+  if [ -n "$token" ]; then
+    printf '%s' "$token" | podman secret create entsoe_api_key - >/dev/null
+    echo "==> Stored the token as podman secret 'entsoe_api_key'"
+  else
+    echo "==> No ENTSO-E token: the dashboard runs without day-ahead prices"
+  fi
+fi
+
 mkdir -p "$UNIT_DIR"
 curl -fsSL "$UNIT_URL" -o "${UNIT_DIR}/fingrid-viewer.container"
+if podman secret inspect entsoe_api_key >/dev/null 2>&1; then
+  sed -i 's/^#Secret=entsoe_api_key/Secret=entsoe_api_key/' "${UNIT_DIR}/fingrid-viewer.container"
+fi
 echo "==> Installed ${UNIT_DIR}/fingrid-viewer.container"
 
 systemctl --user daemon-reload

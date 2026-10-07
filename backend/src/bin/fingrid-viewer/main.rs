@@ -10,8 +10,13 @@
 //!   DIST_DIR               the built frontend, default ./dist
 //!   FINGRID_DAILY_LIMIT    upstream calls allowed per UTC day, default 8000
 //!   FINGRID_API_BASE       API root, default https://data.fingrid.fi/api
+//!   ENTSOE_API_KEY         ENTSO-E Transparency Platform security token for
+//!                          day-ahead prices (or ENTSOE_API_KEY_FILE); without
+//!                          it the price card is simply not shown
+//!   ENTSOE_API_BASE        API root, default https://web-api.tp.entsoe.eu/api
 
 mod cache;
+mod entsoe;
 mod series;
 
 use axum::{
@@ -23,7 +28,8 @@ use axum::{
     Json, Router,
 };
 use cache::{Cache, CacheError, Entry};
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{Duration as ChronoDuration, DurationRound, Utc};
+use entsoe::EntsoeClient;
 use fingrid_collector::fingrid_client::{FingridClient, Throttle};
 use serde::Deserialize;
 use series::Range;
@@ -51,6 +57,9 @@ const DASHBOARD_IDS: &[i32] = &[
 /// Dashboard refresh. Fingrid publishes real-time values every three minutes.
 const DASHBOARD_TTL: Duration = Duration::from_secs(150);
 const CATALOG_TTL: Duration = Duration::from_secs(12 * 3600);
+/// Day-ahead prices change once a day, when the next day's auction result is
+/// published around 13:45 Finnish time; this picks it up soon after.
+const PRICES_TTL: Duration = Duration::from_secs(10 * 60);
 
 struct App {
     client: FingridClient,
@@ -59,6 +68,11 @@ struct App {
     /// Ids in the last catalog fetched, so a series request for an id that
     /// does not exist is turned away without spending an upstream call.
     known_ids: RwLock<HashSet<i32>>,
+    /// None when no ENTSO-E token is configured.
+    entsoe: Option<EntsoeClient>,
+    /// Kept apart from `cache`, which runs its fetches one at a time to suit
+    /// Fingrid's rate limit: a slow ENTSO-E call must not hold Fingrid up.
+    price_cache: Cache,
 }
 
 type Shared = Arc<App>;
@@ -72,7 +86,7 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let api_key = match read_api_key() {
+    let api_key = match read_secret("FINGRID_API_KEY") {
         Some(key) => key,
         None => {
             eprintln!("FINGRID_API_KEY (or FINGRID_API_KEY_FILE) must be set to a Fingrid open data API key.");
@@ -95,11 +109,24 @@ async fn main() {
         client = client.with_base(&base);
     }
 
+    let entsoe = read_secret("ENTSOE_API_KEY").map(|token| {
+        let mut c = EntsoeClient::new(&token).expect("HTTP client");
+        if let Ok(base) = std::env::var("ENTSOE_API_BASE") {
+            c = c.with_base(&base);
+        }
+        c
+    });
+    if entsoe.is_none() {
+        tracing::info!("ENTSOE_API_KEY is not set, so day-ahead prices are not shown");
+    }
+
     let app = Arc::new(App {
         client,
         throttle,
         cache: Cache::new(),
         known_ids: RwLock::new(HashSet::new()),
+        entsoe,
+        price_cache: Cache::new(),
     });
 
     // Keep the catalog and the dashboard warm, so no visitor waits on Fingrid
@@ -110,6 +137,9 @@ async fn main() {
             loop {
                 let _ = catalog(&app).await;
                 let _ = dashboard(&app).await;
+                if app.entsoe.is_some() {
+                    let _ = prices(&app).await;
+                }
                 tokio::time::sleep(Duration::from_secs(30)).await;
             }
         });
@@ -123,6 +153,7 @@ async fn main() {
         .route("/api/dashboard",           get(dashboard_handler))
         .route("/api/datasets",            get(datasets_handler))
         .route("/api/datasets/{id}/data",  get(data_handler))
+        .route("/api/prices",              get(prices_handler))
         .fallback(|| async { (StatusCode::NOT_FOUND, "Not found") })
         .with_state(app);
 
@@ -154,10 +185,11 @@ async fn main() {
         .unwrap();
 }
 
-fn read_api_key() -> Option<String> {
-    let key = match std::env::var("FINGRID_API_KEY_FILE") {
+/// `NAME` from the environment, or the contents of the file `NAME_FILE` names.
+fn read_secret(name: &str) -> Option<String> {
+    let key = match std::env::var(format!("{}_FILE", name)) {
         Ok(path) => std::fs::read_to_string(path).ok()?,
-        Err(_) => std::env::var("FINGRID_API_KEY").ok()?,
+        Err(_) => std::env::var(name).ok()?,
     };
     let key = key.trim().to_string();
     (!key.is_empty()).then_some(key)
@@ -204,6 +236,30 @@ async fn dashboard(app: &App) -> Result<(Entry, bool), CacheError> {
             .get_multi_data(DASHBOARD_IDS, &series::rfc3339(start), &series::rfc3339(end))
             .await?;
         let body = series::dashboard(&points, now, start, end);
+        Ok(Bytes::from(serde_json::to_vec(&body)?))
+    }).await
+}
+
+/// Yesterday through tomorrow and a little beyond, in whole UTC days: every
+/// delivery day that can be published, whatever the visitor's time zone.
+async fn prices(app: &App) -> Result<(Entry, bool), CacheError> {
+    let Some(client) = &app.entsoe else {
+        return Err(CacheError::Upstream(anyhow::anyhow!("ENTSO-E is not configured")));
+    };
+    app.price_cache.get_or_fetch("prices", PRICES_TTL, || async {
+        let today = Utc::now().duration_trunc(ChronoDuration::days(1))?;
+        let start = today - ChronoDuration::days(2);
+        let end = today + ChronoDuration::days(3);
+        let prices = client.day_ahead_prices(entsoe::FINLAND, start, end).await?;
+        let body = serde_json::json!({
+            "area": "FI",
+            "start": series::rfc3339(start),
+            "end": series::rfc3339(end),
+            "currency": prices.currency,
+            "unit": prices.unit,
+            "resolutionMinutes": prices.resolution_minutes,
+            "points": prices.points,
+        });
         Ok(Bytes::from(serde_json::to_vec(&body)?))
     }).await
 }
@@ -264,9 +320,11 @@ fn json_response(result: Result<(Entry, bool), CacheError>, ttl: Duration) -> Re
 
 async fn health_handler(State(app): State<Shared>) -> Json<serde_json::Value> {
     let dashboard_age = app.cache.peek("dashboard").map(|e| e.age().as_secs());
+    let prices_age = app.price_cache.peek("prices").map(|e| e.age().as_secs());
     Json(serde_json::json!({
         "ok": dashboard_age.is_some_and(|age| age < 15 * 60),
         "dashboardAgeSeconds": dashboard_age,
+        "pricesAgeSeconds": prices_age,
         "fingridCallsToday": app.throttle.used_today().await,
     }))
 }
@@ -282,6 +340,19 @@ async fn dashboard_handler(State(app): State<Shared>) -> Response {
 
 async fn datasets_handler(State(app): State<Shared>) -> Response {
     json_response(catalog(&app).await, CATALOG_TTL)
+}
+
+async fn prices_handler(State(app): State<Shared>) -> Response {
+    if app.entsoe.is_none() {
+        return (StatusCode::NOT_FOUND, "Day-ahead prices are not configured").into_response();
+    }
+    match prices(&app).await {
+        Err(CacheError::Upstream(_)) => (
+            StatusCode::BAD_GATEWAY,
+            "ENTSO-E did not answer. Try again in a moment.",
+        ).into_response(),
+        result => json_response(result, PRICES_TTL),
+    }
 }
 
 #[derive(Deserialize)]

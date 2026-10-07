@@ -23,7 +23,8 @@ import { fmtDateTime, formatValue, tickFormatter, timeTicks } from '../format';
    - one y-axis per chart; measures in different units get their own chart
    - solid hairline grid, no axis lines; 2px series lines
    - identity is never colour alone: a legend for 2+ series, plus tooltips
-   - forecasts are drawn dashed, and a "Now" rule splits past from future */
+   - forecasts are drawn dashed, and a "Now" rule splits past from future
+   - prices, which hold for a whole period, are drawn as steps */
 
 export interface ChartSeries {
   key: string;
@@ -32,6 +33,8 @@ export interface ChartSeries {
   points: Point[];
   kind?: 'line' | 'area' | 'stack';
   dashed?: boolean;
+  /** Each value holds until the next, as a market price does. Lines only. */
+  step?: boolean;
 }
 
 const useStyles = makeStyles({
@@ -352,7 +355,7 @@ export const TimeChart: React.FC<{
               <Line
                 key={s.key}
                 dataKey={s.key}
-                type="monotone"
+                type={s.step ? 'stepAfter' : 'monotone'}
                 stroke={s.color}
                 strokeWidth={2}
                 strokeDasharray={s.dashed ? '5 4' : undefined}
