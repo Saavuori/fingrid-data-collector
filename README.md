@@ -112,7 +112,7 @@ fingrid,dataset_id=<id>,dataset_name=<escaped_name>,unit=<escaped_unit> value=<f
 
 A read-only website in the spirit of Fingrid's [power system state](https://www.fingrid.fi/sahkomarkkinat/sahkojarjestelman-tila/) page, built to be published:
 
-- **Grid now** — system state and shortage alerts, consumption, production, net import/export, frequency and CO₂ intensity with 24 h sparklines; production by source as a stacked 24 h chart with consumption on top; consumption and production with Fingrid's forecast for the next 24 h; live cross-border flows (SE1, SE3, Norway, Estonia) with direction.
+- **Grid now** — system state and shortage alerts, consumption, production, net import/export, frequency and CO₂ intensity with 24 h sparklines; production by source as a stacked 24 h chart with consumption on top; consumption and production with Fingrid's forecast for the next 24 h; live cross-border flows (SE1, SE3, Norway, Estonia) with direction; and, with an ENTSO-E token, today's and tomorrow's day-ahead electricity price for Finland in c/kWh.
 - **All data** — every dataset in Fingrid's catalog, searchable in Finnish and English, filterable by category and unit. Each dataset opens with 24 h / 3 / 7 / 30 day ranges, forecasts drawn past a "Now" line, a table view, CSV download and a shareable link.
 - **Suomi / English**, dark and light themes, works on a phone.
 
@@ -142,9 +142,12 @@ For Docker or podman-compose instead, use [`deploy/viewer/compose.yaml`](deploy/
 |---|---|---|
 | `FINGRID_API_KEY` | — | Your key, or `FINGRID_API_KEY_FILE` pointing at a file holding it |
 | `FINGRID_DAILY_LIMIT` | `8000` | Upstream calls allowed per UTC day |
+| `ENTSOE_API_KEY` | — | Optional [ENTSO-E Transparency Platform](https://transparency.entsoe.eu) security token, or `ENTSOE_API_KEY_FILE`. Adds day-ahead prices; without it they are not shown |
 | `PORT` | `3000` | Listen port inside the container |
 
 `GET /api/health` reports whether the front page is fresh and how many Fingrid calls were made today.
+
+**Day-ahead prices.** Fingrid does not publish market prices, so they come from ENTSO-E. To get a token, register at [transparency.entsoe.eu](https://transparency.entsoe.eu) and email transparency@entsoe.eu with "Restful API access" as the subject; the token then appears under *My Account Settings*. The server fetches yesterday through tomorrow in one call every 10 minutes, so tomorrow's prices show up shortly after they are published (around 14:00 Finnish time). `install.sh` asks for the token and stores it as the podman secret `entsoe_api_key`.
 
 ### Developing the viewer
 
@@ -157,5 +160,5 @@ cd frontend && npm run dev:viewer
 
 The viewer's frontend lives in `frontend/src/viewer` and shares the theme and UI components with the collector; `npm run build:viewer` builds it to `frontend/dist-viewer`. The backend is `backend/src/bin/fingrid-viewer`, sharing the Fingrid client in `backend/src/fingrid_client.rs`.
 
-Data: [Fingrid Open Data](https://data.fingrid.fi), licensed CC BY 4.0. The dashboard credits it in its footer; keep that if you change the page.
+Data: [Fingrid Open Data](https://data.fingrid.fi), licensed CC BY 4.0, and day-ahead prices from the [ENTSO-E Transparency Platform](https://transparency.entsoe.eu). The dashboard credits both in its footer; keep that if you change the page.
 

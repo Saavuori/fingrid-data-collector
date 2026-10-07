@@ -61,6 +61,18 @@ const en = {
   emissionsTitle: 'Emission factor',
   emissionsSubtitle: 'Estimated gCO₂ per kWh, real time',
   openDataset: 'Open dataset',
+  price: 'Electricity price',
+  priceTitle: 'Day-ahead electricity price',
+  priceSubtitle: 'Finland’s day-ahead market, c/kWh excl. VAT',
+  priceNow: 'Now',
+  priceTodayAvg: 'Today, average',
+  priceTodayLow: 'Today, lowest',
+  priceTodayHigh: 'Today, highest',
+  priceTomorrowAvg: 'Tomorrow, average',
+  priceTomorrowPending: 'Published around 14:00',
+  priceRange: (low: string, high: string) => `Today ${low}–${high}`,
+  priceStale: 'Showing the last prices received — ENTSO-E is not answering right now.',
+  priceFailed: 'Prices are unavailable right now. The page tries again automatically.',
 
   hydro: 'Hydro',
   nuclear: 'Nuclear',
@@ -138,6 +150,7 @@ const en = {
     shown < total ? `Newest ${shown} of ${total} rows. The CSV has them all.` : `${total} rows`,
 
   footer: 'Data: Fingrid Open Data, licensed CC BY 4.0. Not an official Fingrid service.',
+  footerPrices: 'Day-ahead prices: ENTSO-E Transparency Platform,',
 };
 
 type Strings = typeof en;
@@ -199,6 +212,18 @@ const fi: Strings = {
   emissionsTitle: 'Päästökerroin',
   emissionsSubtitle: 'Arvioitu gCO₂ kilowattitunnille, reaaliaikainen',
   openDataset: 'Avaa tietoaineisto',
+  price: 'Pörssisähkö',
+  priceTitle: 'Pörssisähkön hinta',
+  priceSubtitle: 'Suomen vuorokausimarkkina, c/kWh ilman arvonlisäveroa',
+  priceNow: 'Nyt',
+  priceTodayAvg: 'Tänään, keskiarvo',
+  priceTodayLow: 'Tänään, alin',
+  priceTodayHigh: 'Tänään, ylin',
+  priceTomorrowAvg: 'Huomenna, keskiarvo',
+  priceTomorrowPending: 'Julkaistaan noin klo 14',
+  priceRange: (low, high) => `Tänään ${low}–${high}`,
+  priceStale: 'Näytetään viimeisimmät saadut hinnat — ENTSO-E ei juuri nyt vastaa.',
+  priceFailed: 'Hintoja ei juuri nyt saatu. Sivu yrittää automaattisesti uudelleen.',
 
   hydro: 'Vesivoima',
   nuclear: 'Ydinvoima',
@@ -274,6 +299,7 @@ const fi: Strings = {
     shown < total ? `Uusimmat ${shown} / ${total} riviä. CSV sisältää kaikki.` : `${total} riviä`,
 
   footer: 'Data: Fingridin avoin data, lisenssi CC BY 4.0. Ei Fingridin virallinen palvelu.',
+  footerPrices: 'Pörssisähkön hinnat: ENTSO-E Transparency Platform,',
 };
 
 export const STRINGS: Record<Lang, Strings> = { en, fi };

@@ -10,6 +10,7 @@ import {
 } from '@fluentui/react-icons';
 
 import Logo from '../../components/Logo';
+import { usePrices } from '../api';
 import { useI18n } from '../i18n';
 import { href } from '../router';
 
@@ -248,12 +249,23 @@ export const TabBar: React.FC<{ section: Section }> = ({ section }) => {
 export const Footer: React.FC<{ version: string }> = ({ version }) => {
   const styles = useStyles();
   const { t } = useI18n();
+  // Shares the price card's query, so the credit shows wherever prices do.
+  const prices = usePrices();
   return (
     <footer className={styles.footer}>
       {t.footer}{' '}
       <a className={styles.footerLink} href="https://data.fingrid.fi" target="_blank" rel="noreferrer">
         data.fingrid.fi
       </a>
+      {prices.data && (
+        <>
+          {' · '}
+          {t.footerPrices}{' '}
+          <a className={styles.footerLink} href="https://transparency.entsoe.eu" target="_blank" rel="noreferrer">
+            transparency.entsoe.eu
+          </a>
+        </>
+      )}
       {version ? ` · ${version}` : ''}
     </footer>
   );
