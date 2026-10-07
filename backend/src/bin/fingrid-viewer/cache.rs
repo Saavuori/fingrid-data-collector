@@ -14,8 +14,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Responses kept at most; the oldest goes first. The 30-day series of a
-/// 3-minute dataset is the largest at roughly half a megabyte.
+/// Responses kept at most; the oldest goes first, pinned keys never. The
+/// 30-day series of a 3-minute dataset is the largest at roughly half a
+/// megabyte.
 const MAX_ENTRIES: usize = 400;
 
 /// Distinct responses allowed to queue for an upstream fetch. Each fetch takes
@@ -42,6 +43,9 @@ pub enum CacheError {
     Busy,
     /// The fetch failed and nothing was cached to fall back on.
     Upstream(anyhow::Error),
+    /// Served only from what the background refresher fetches, and it has
+    /// not fetched it yet.
+    NotReady,
 }
 
 pub struct Cache {
@@ -53,6 +57,9 @@ pub struct Cache {
     /// whose key was filled while it queued is answered from the cache.
     fetch_lock: tokio::sync::Mutex<()>,
     waiting: AtomicUsize,
+    /// Never evicted. Refetching these spends the reserved budget, so visitor
+    /// traffic must not be able to push them out.
+    pinned: &'static [&'static str],
 }
 
 /// Drops a key's lock from the map once nobody holds or waits on it.
@@ -87,7 +94,13 @@ impl Cache {
             key_locks: Mutex::new(HashMap::new()),
             fetch_lock: tokio::sync::Mutex::new(()),
             waiting: AtomicUsize::new(0),
+            pinned: &[],
         }
+    }
+
+    pub fn with_pinned(mut self, keys: &'static [&'static str]) -> Self {
+        self.pinned = keys;
+        self
     }
 
     pub fn peek(&self, key: &str) -> Option<Entry> {
@@ -104,6 +117,7 @@ impl Cache {
         entries.insert(key.to_string(), entry.clone());
         while entries.len() > MAX_ENTRIES {
             let oldest = entries.iter()
+                .filter(|(k, _)| !self.pinned.contains(&k.as_str()))
                 .min_by_key(|(_, e)| e.fetched_at)
                 .map(|(k, _)| k.clone());
             match oldest {
@@ -254,5 +268,17 @@ mod tests {
         }
         assert!(cache.peek("0").is_none());
         assert!(cache.peek(&MAX_ENTRIES.to_string()).is_some());
+    }
+
+    #[test]
+    fn pinned_entries_are_never_evicted() {
+        let cache = Cache::new().with_pinned(&["catalog"]);
+        cache.insert("catalog", Bytes::new());
+        for i in 0..=MAX_ENTRIES {
+            std::thread::sleep(Duration::from_micros(10));
+            cache.insert(&i.to_string(), Bytes::new());
+        }
+        assert!(cache.peek("catalog").is_some());
+        assert!(cache.peek("0").is_none());
     }
 }
