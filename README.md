@@ -123,6 +123,8 @@ Visitors never reach Fingrid. The API key stays on the server (an environment va
 - The front page is one multi-dataset call, refreshed every ~2.5 minutes in the background.
 - Dataset pages offer fixed ranges, so all visitors share one cached fetch per dataset and range (3 min to 1 h, depending on the range). Many visitors opening the same link cost one upstream call.
 - Upstream calls are spaced ≥ 2.1 s apart and capped per day (`FINGRID_DAILY_LIMIT`, default 8000 of Fingrid's 10 000). If Fingrid fails, the last good copy is served.
+- The front page and catalog are refreshed only by a background task, from a reserve visitors cannot spend (`FINGRID_DAILY_RESERVE`, default 1500): however many dataset pages are opened, the front page keeps updating. The task slows to one try per 5 minutes while fetches fail.
+- If Fingrid rejects the key (401/403), every call is refused locally for 1 minute, doubling up to 30 minutes, so a bad key costs a few calls an hour. `/api/health` reports it as `fingridKeyRejected`.
 
 ### Deploying on a server with podman (Quadlet)
 
@@ -142,6 +144,7 @@ For Docker or podman-compose instead, use [`deploy/viewer/compose.yaml`](deploy/
 |---|---|---|
 | `FINGRID_API_KEY` | — | Your key, or `FINGRID_API_KEY_FILE` pointing at a file holding it |
 | `FINGRID_DAILY_LIMIT` | `8000` | Upstream calls allowed per UTC day |
+| `FINGRID_DAILY_RESERVE` | `1500` | Of those, kept for the front page and catalog refreshes |
 | `PORT` | `3000` | Listen port inside the container |
 
 `GET /api/health` reports whether the front page is fresh and how many Fingrid calls were made today.

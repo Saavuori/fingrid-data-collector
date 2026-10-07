@@ -84,12 +84,31 @@ fn into_points(raw: Vec<RawDataPoint>) -> Vec<DataPoint> {
 /// Fingrid's largest page.
 const MAX_PAGE_SIZE: &str = "20000";
 
+/// Whose request it is, for the daily budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Priority {
+    /// Work the service cannot do without, such as keeping its front page
+    /// fresh. May spend the whole budget, the reserve included.
+    Essential,
+    /// Fetches set off by visitors. Stop short of the reserve, so no amount
+    /// of traffic can starve the essential work.
+    Visitor,
+}
+
+/// After Fingrid rejects the key, every call is refused locally for this long,
+/// doubling with each further rejection up to `AUTH_BACKOFF_MAX`. A bad key
+/// then costs a handful of calls an hour instead of one every few seconds.
+const AUTH_BACKOFF_START: Duration = Duration::from_secs(60);
+const AUTH_BACKOFF_MAX: Duration = Duration::from_secs(30 * 60);
+
 /// Keeps every request made with one API key inside Fingrid's limits: one call
 /// per two seconds, and at most `daily_limit` calls per UTC day (Fingrid allows
-/// 10 000). Callers queue on the lock, so requests go out one at a time.
+/// 10 000), of which the last `reserve` are kept for `Priority::Essential`.
+/// Callers queue on the lock, so requests go out one at a time.
 pub struct Throttle {
     gap: Duration,
     daily_limit: u32,
+    reserve: u32,
     state: Mutex<ThrottleState>,
 }
 
@@ -97,6 +116,9 @@ struct ThrottleState {
     last: Option<Instant>,
     day: chrono::NaiveDate,
     used: u32,
+    /// Rejections of the key in a row; reset by any accepted call.
+    auth_rejections: u32,
+    blocked_until: Option<Instant>,
 }
 
 impl Throttle {
@@ -104,20 +126,48 @@ impl Throttle {
         Self {
             gap,
             daily_limit,
-            state: Mutex::new(ThrottleState { last: None, day: chrono::Utc::now().date_naive(), used: 0 }),
+            reserve: 0,
+            state: Mutex::new(ThrottleState {
+                last: None,
+                day: chrono::Utc::now().date_naive(),
+                used: 0,
+                auth_rejections: 0,
+                blocked_until: None,
+            }),
         }
     }
 
-    /// Waits for the next free slot, or fails once today's budget is spent.
-    pub async fn acquire(&self) -> Result<()> {
+    /// Keeps the last `reserve` calls of each day for `Priority::Essential`.
+    pub fn with_reserve(mut self, reserve: u32) -> Self {
+        self.reserve = reserve.min(self.daily_limit);
+        self
+    }
+
+    /// Waits for the next free slot. Fails without spending anything while the
+    /// key is in its rejection backoff, or once the budget open to `priority`
+    /// is spent.
+    pub async fn acquire(&self, priority: Priority) -> Result<()> {
         let mut st = self.state.lock().await;
+        if let Some(until) = st.blocked_until {
+            let now = Instant::now();
+            if now < until {
+                return Err(anyhow!(
+                    "Fingrid rejected the API key; not trying again for {} s",
+                    (until - now).as_secs()
+                ));
+            }
+        }
         let today = chrono::Utc::now().date_naive();
         if st.day != today {
             st.day = today;
             st.used = 0;
         }
-        if st.used >= self.daily_limit {
-            return Err(anyhow!("Daily Fingrid request budget ({}) is used up", self.daily_limit));
+        let limit = match priority {
+            Priority::Essential => self.daily_limit,
+            Priority::Visitor => self.daily_limit - self.reserve,
+        };
+        if st.used >= limit {
+            return Err(anyhow!("Daily Fingrid request budget ({}) is used up", limit));
         }
         if let Some(last) = st.last {
             tokio::time::sleep_until(last + self.gap).await;
@@ -127,10 +177,33 @@ impl Throttle {
         Ok(())
     }
 
+    /// Records a 401/403 and returns how long calls are now refused.
+    pub async fn key_rejected(&self) -> Duration {
+        let mut st = self.state.lock().await;
+        let backoff = AUTH_BACKOFF_START
+            .saturating_mul(1 << st.auth_rejections.min(10))
+            .min(AUTH_BACKOFF_MAX);
+        st.auth_rejections += 1;
+        st.blocked_until = Some(Instant::now() + backoff);
+        backoff
+    }
+
+    /// Records that Fingrid accepted the key, ending any backoff.
+    pub async fn key_accepted(&self) {
+        let mut st = self.state.lock().await;
+        st.auth_rejections = 0;
+        st.blocked_until = None;
+    }
+
     /// Requests made so far today.
     pub async fn used_today(&self) -> u32 {
         let st = self.state.lock().await;
         if st.day == chrono::Utc::now().date_naive() { st.used } else { 0 }
+    }
+
+    /// True while the last answer was a rejected key.
+    pub async fn key_is_rejected(&self) -> bool {
+        self.state.lock().await.auth_rejections > 0
     }
 }
 
@@ -140,6 +213,7 @@ pub struct FingridClient {
     api_key: String,
     base: String,
     throttle: Option<Arc<Throttle>>,
+    priority: Priority,
 }
 
 const API_BASE: &str = "https://data.fingrid.fi/api";
@@ -160,6 +234,7 @@ impl FingridClient {
             api_key: api_key.to_string(),
             base: API_BASE.to_string(),
             throttle: None,
+            priority: Priority::Essential,
         })
     }
 
@@ -182,6 +257,11 @@ impl FingridClient {
         self
     }
 
+    /// A copy whose requests draw on the throttle as `priority`.
+    pub fn with_priority(&self, priority: Priority) -> Self {
+        Self { priority, ..self.clone() }
+    }
+
     /// Sends a GET to the Fingrid API, retrying on `429 Too Many Requests`.
     /// Any other status, success or not, is returned to the caller.
     async fn get(&self, path: &str, query: &[(&str, &str)], what: &str) -> Result<reqwest::Response> {
@@ -189,7 +269,7 @@ impl FingridClient {
         let mut retries = 0;
         loop {
             if let Some(throttle) = &self.throttle {
-                throttle.acquire().await?;
+                throttle.acquire(self.priority).await?;
             }
             let res = self.client.get(&url)
                 .header("x-api-key", &self.api_key)
@@ -197,6 +277,19 @@ impl FingridClient {
                 .query(query)
                 .send()
                 .await?;
+
+            if let Some(throttle) = &self.throttle {
+                let status = res.status();
+                if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+                    let backoff = throttle.key_rejected().await;
+                    tracing::warn!(
+                        "Fingrid rejected the API key ({}) {}; pausing all calls for {} s",
+                        status, what, backoff.as_secs()
+                    );
+                } else if status.is_success() {
+                    throttle.key_accepted().await;
+                }
+            }
 
             if res.status() == StatusCode::TOO_MANY_REQUESTS && retries < MAX_429_RETRIES {
                 tracing::warn!("Rate limit (429) {}. Retrying in 2.2 seconds...", what);
@@ -370,11 +463,49 @@ mod tests {
     async fn throttle_spaces_calls_and_enforces_the_daily_budget() {
         let throttle = Throttle::new(Duration::from_secs(2), 3);
         let t0 = Instant::now();
-        throttle.acquire().await.unwrap();
-        throttle.acquire().await.unwrap();
-        throttle.acquire().await.unwrap();
+        throttle.acquire(Priority::Essential).await.unwrap();
+        throttle.acquire(Priority::Essential).await.unwrap();
+        throttle.acquire(Priority::Essential).await.unwrap();
         assert!(Instant::now() - t0 >= Duration::from_secs(4));
-        assert!(throttle.acquire().await.is_err());
+        assert!(throttle.acquire(Priority::Essential).await.is_err());
         assert_eq!(throttle.used_today().await, 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn visitors_cannot_spend_the_reserve() {
+        let throttle = Throttle::new(Duration::from_secs(2), 5).with_reserve(2);
+        for _ in 0..3 {
+            throttle.acquire(Priority::Visitor).await.unwrap();
+        }
+        assert!(throttle.acquire(Priority::Visitor).await.is_err());
+        throttle.acquire(Priority::Essential).await.unwrap();
+        throttle.acquire(Priority::Essential).await.unwrap();
+        assert!(throttle.acquire(Priority::Essential).await.is_err());
+        assert_eq!(throttle.used_today().await, 5);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rejected_key_pauses_calls_with_growing_backoff() {
+        let throttle = Throttle::new(Duration::from_secs(2), 100);
+        throttle.acquire(Priority::Essential).await.unwrap();
+        assert_eq!(throttle.key_rejected().await, AUTH_BACKOFF_START);
+        assert!(throttle.key_is_rejected().await);
+
+        // Refused while paused, and the refusals cost nothing.
+        assert!(throttle.acquire(Priority::Essential).await.is_err());
+        assert!(throttle.acquire(Priority::Visitor).await.is_err());
+        assert_eq!(throttle.used_today().await, 1);
+
+        tokio::time::advance(AUTH_BACKOFF_START).await;
+        throttle.acquire(Priority::Essential).await.unwrap();
+        assert_eq!(throttle.key_rejected().await, AUTH_BACKOFF_START * 2);
+        for _ in 0..10 {
+            throttle.key_rejected().await;
+        }
+        assert_eq!(throttle.key_rejected().await, AUTH_BACKOFF_MAX);
+
+        throttle.key_accepted().await;
+        assert!(!throttle.key_is_rejected().await);
+        throttle.acquire(Priority::Essential).await.unwrap();
     }
 }

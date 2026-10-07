@@ -9,6 +9,8 @@
 //!   PORT                   listen port, default 3000
 //!   DIST_DIR               the built frontend, default ./dist
 //!   FINGRID_DAILY_LIMIT    upstream calls allowed per UTC day, default 8000
+//!   FINGRID_DAILY_RESERVE  of those, kept for refreshing the front page and
+//!                          catalog — visitors can never spend them. Default 1500
 //!   FINGRID_API_BASE       API root, default https://data.fingrid.fi/api
 
 mod cache;
@@ -24,7 +26,7 @@ use axum::{
 };
 use cache::{Cache, CacheError, Entry};
 use chrono::{Duration as ChronoDuration, Utc};
-use fingrid_collector::fingrid_client::{FingridClient, Throttle};
+use fingrid_collector::fingrid_client::{FingridClient, Priority, Throttle};
 use serde::Deserialize;
 use series::Range;
 use std::collections::HashSet;
@@ -52,8 +54,23 @@ const DASHBOARD_IDS: &[i32] = &[
 const DASHBOARD_TTL: Duration = Duration::from_secs(150);
 const CATALOG_TTL: Duration = Duration::from_secs(12 * 3600);
 
+/// The background refresher's pace, and its slowest pace while fetches fail.
+const REFRESH_EVERY: Duration = Duration::from_secs(30);
+const REFRESH_BACKOFF_MAX: Duration = Duration::from_secs(5 * 60);
+
+/// Kept warm by the background refresher and never evicted, so the reserve
+/// they draw on is spent only on schedule.
+const PINNED: &[&str] = &["catalog", "dashboard"];
+
+/// The reserve's default: the dashboard refreshes every 150 s, 576 times a
+/// day, and can take two pages; the catalog adds a few calls.
+const DEFAULT_RESERVE: u32 = 1500;
+
 struct App {
+    /// Essential priority: the dashboard and catalog refreshes.
     client: FingridClient,
+    /// Visitor priority: dataset series fetched because someone asked.
+    visitor_client: FingridClient,
     throttle: Arc<Throttle>,
     cache: Cache,
     /// Ids in the last catalog fetched, so a series request for an id that
@@ -83,9 +100,14 @@ async fn main() {
     let daily_limit = std::env::var("FINGRID_DAILY_LIMIT").ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(8000);
+    let reserve = std::env::var("FINGRID_DAILY_RESERVE").ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_RESERVE);
     // A little over two seconds, so clock jitter never lands two calls inside
     // Fingrid's window.
-    let throttle = Arc::new(Throttle::new(Duration::from_millis(2100), daily_limit));
+    let throttle = Arc::new(
+        Throttle::new(Duration::from_millis(2100), daily_limit).with_reserve(reserve),
+    );
 
     let mut client = FingridClient::new(&api_key)
         .and_then(|c| c.with_timeout(Duration::from_secs(30)))
@@ -96,21 +118,25 @@ async fn main() {
     }
 
     let app = Arc::new(App {
+        visitor_client: client.with_priority(Priority::Visitor),
         client,
         throttle,
-        cache: Cache::new(),
+        cache: Cache::new().with_pinned(PINNED),
         known_ids: RwLock::new(HashSet::new()),
     });
 
-    // Keep the catalog and the dashboard warm, so no visitor waits on Fingrid
-    // for the front page.
+    // Keep the catalog and the dashboard warm. Visitors are only ever served
+    // what this loop fetched, so no visitor waits on Fingrid for the front
+    // page and none can make it fetch more often. While fetches fail the loop
+    // slows down, rather than retrying an outage every 30 s.
     {
         let app = Arc::clone(&app);
         tokio::spawn(async move {
+            let mut pause = REFRESH_EVERY;
             loop {
-                let _ = catalog(&app).await;
-                let _ = dashboard(&app).await;
-                tokio::time::sleep(Duration::from_secs(30)).await;
+                let ok = refreshed(catalog(&app).await) & refreshed(dashboard(&app).await);
+                pause = if ok { REFRESH_EVERY } else { (pause * 2).min(REFRESH_BACKOFF_MAX) };
+                tokio::time::sleep(pause).await;
             }
         });
     }
@@ -181,6 +207,23 @@ async fn shutdown_signal() {
 // Cached fetches
 // ---------------------------------------------------------------------------
 
+/// True when the response is current: fetched now, or still fresh in the cache.
+fn refreshed(result: Result<(Entry, bool), CacheError>) -> bool {
+    matches!(result, Ok((_, false)))
+}
+
+/// What the background refresher last fetched for `key`, for a visitor. It
+/// counts as stale once it has missed a couple of refreshes.
+fn warm(app: &App, key: &str, ttl: Duration) -> Result<(Entry, bool), CacheError> {
+    match app.cache.peek(key) {
+        Some(e) => {
+            let stale = e.age() > ttl * 2;
+            Ok((e, stale))
+        }
+        None => Err(CacheError::NotReady),
+    }
+}
+
 async fn catalog(app: &App) -> Result<(Entry, bool), CacheError> {
     let result = app.cache.get_or_fetch("catalog", CATALOG_TTL, || async {
         let mut list = app.client.get_datasets().await?;
@@ -215,7 +258,7 @@ async fn dataset_series(app: &App, id: i32, range: Range) -> Result<(Entry, bool
         let start = now - range.back();
         let end = now + range.ahead();
         let (start_s, end_s) = (series::rfc3339(start), series::rfc3339(end));
-        let (points, truncated) = app.client.get_dataset_data_newest(id, &start_s, &end_s).await?;
+        let (points, truncated) = app.visitor_client.get_dataset_data_newest(id, &start_s, &end_s).await?;
         let points = series::group(&points).remove(&id).unwrap_or_default();
         let body = series::SeriesResponse { id, range: range.key(), start: start_s, end: end_s, truncated, points };
         Ok(Bytes::from(serde_json::to_vec(&body)?))
@@ -248,6 +291,11 @@ fn json_response(result: Result<(Entry, bool), CacheError>, ttl: Duration) -> Re
             }
             res
         }
+        Err(CacheError::NotReady) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::RETRY_AFTER, "5")],
+            "Still loading data from Fingrid, try again in a moment",
+        ).into_response(),
         Err(CacheError::Busy) => (
             StatusCode::SERVICE_UNAVAILABLE,
             [(header::RETRY_AFTER, "5")],
@@ -268,6 +316,7 @@ async fn health_handler(State(app): State<Shared>) -> Json<serde_json::Value> {
         "ok": dashboard_age.is_some_and(|age| age < 15 * 60),
         "dashboardAgeSeconds": dashboard_age,
         "fingridCallsToday": app.throttle.used_today().await,
+        "fingridKeyRejected": app.throttle.key_is_rejected().await,
     }))
 }
 
@@ -277,11 +326,11 @@ async fn version_handler() -> Json<serde_json::Value> {
 }
 
 async fn dashboard_handler(State(app): State<Shared>) -> Response {
-    json_response(dashboard(&app).await, DASHBOARD_TTL)
+    json_response(warm(&app, "dashboard", DASHBOARD_TTL), DASHBOARD_TTL)
 }
 
 async fn datasets_handler(State(app): State<Shared>) -> Response {
-    json_response(catalog(&app).await, CATALOG_TTL)
+    json_response(warm(&app, "catalog", CATALOG_TTL), CATALOG_TTL)
 }
 
 #[derive(Deserialize)]
@@ -300,8 +349,9 @@ async fn data_handler(
         Some(None) => return (StatusCode::BAD_REQUEST, "range must be one of 24h, 3d, 7d, 30d").into_response(),
     };
 
-    if let Err(e) = catalog(&app).await {
-        return json_response(Err(e), CATALOG_TTL);
+    // The background refresher fills the ids; until it has, nothing is known.
+    if app.known_ids.read().unwrap().is_empty() {
+        return json_response(Err(CacheError::NotReady), CATALOG_TTL);
     }
     if !app.known_ids.read().unwrap().contains(&id) {
         return (StatusCode::NOT_FOUND, format!("No Fingrid dataset {}", id)).into_response();
