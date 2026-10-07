@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:viewer": "vite -c vite.viewer.config.ts",
     "build": "tsc -b && vite build",
+    "build:viewer": "tsc -b && vite build -c vite.viewer.config.ts",
     "lint": "eslint .",
     "preview": "vite preview"
   },

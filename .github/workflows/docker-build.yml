@@ -60,6 +60,7 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
+          target: collector
           platforms: linux/arm64
           push: true
           build-args: |
@@ -68,3 +69,30 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # The public dashboard, ghcr.io/<owner>/fingrid-data-collector-viewer.
+      # Both architectures, so it runs on an Ampere (arm64) or x86 VM alike.
+      - name: Extract viewer metadata
+        id: meta_viewer
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-viewer
+          tags: |
+            type=raw,value=latest
+            type=raw,value=${{ steps.tag_version.outputs.new_tag }}
+            type=sha,prefix=
+
+      - name: Build and push viewer
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          target: viewer
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ steps.tag_version.outputs.new_tag }}
+          tags: ${{ steps.meta_viewer.outputs.tags }}
+          labels: ${{ steps.meta_viewer.outputs.labels }}
+          cache-from: type=gha,scope=viewer
+          cache-to: type=gha,mode=max,scope=viewer

@@ -74,3 +74,6 @@ jobs:
       # dependency bump changing types out from under us.
       - name: Build
         run: npm run build
+
+      - name: Build viewer
+        run: npm run build:viewer

@@ -1,0 +1,21 @@
+# FingridFlow Live behind Caddy. Pick ONE of the two blocks and merge it into
+# your Caddyfile, then validate before reloading:
+#   caddy validate --config /etc/caddy/Caddyfile && sudo systemctl reload caddy
+
+# A) Its own (sub)domain — the cleanest public URL.
+grid.example.fi {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:3010
+}
+
+# B) A path under a site you already serve, e.g. https://<host>/fingrid/
+# The app uses relative URLs, so it works under any prefix.
+# Add these lines INSIDE the existing site block:
+#
+#	redir /fingrid /fingrid/
+#	handle_path /fingrid/* {
+#		reverse_proxy 127.0.0.1:3010
+#	}
+#
+# If Caddy itself runs in a container, 127.0.0.1 is the container, not the
+# host: put both containers on one podman network and use fingrid-viewer:3000.

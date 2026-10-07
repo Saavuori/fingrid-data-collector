@@ -1,7 +1,10 @@
 use serde::{Serialize, Deserialize};
 use anyhow::{Result, anyhow};
 use reqwest::{Client, StatusCode};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
+use tokio::time::Instant;
 
 #[allow(non_snake_case)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +26,8 @@ pub struct Dataset {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatasetListResponse {
     pub data: Vec<Dataset>,
+    #[serde(default)]
+    pub pagination: Option<Pagination>,
 }
 
 #[allow(non_snake_case)]
@@ -35,15 +40,106 @@ pub struct DataPoint {
     pub value: f64,
 }
 
+/// A row as Fingrid sends it. Gaps in a series come through as a null value,
+/// which would fail the whole response if parsed straight into `DataPoint`.
+#[allow(non_snake_case)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawDataPoint {
+    datasetId: i32,
+    startTime: String,
+    endTime: String,
+    value: Option<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawDataPointsResponse {
+    data: Vec<RawDataPoint>,
+    #[serde(default)]
+    pagination: Option<Pagination>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DataPointsResponse {
-    pub data: Vec<DataPoint>,
+#[serde(rename_all = "camelCase")]
+pub struct Pagination {
+    #[serde(default)]
+    pub next_page: Option<u32>,
+}
+
+impl Pagination {
+    fn next(p: &Option<Pagination>) -> Option<u32> {
+        p.as_ref().and_then(|p| p.next_page)
+    }
+}
+
+fn into_points(raw: Vec<RawDataPoint>) -> Vec<DataPoint> {
+    raw.into_iter()
+        .filter_map(|r| {
+            let value = r.value.filter(|v| v.is_finite())?;
+            Some(DataPoint { datasetId: r.datasetId, startTime: r.startTime, endTime: r.endTime, value })
+        })
+        .collect()
+}
+
+/// Fingrid's largest page.
+const MAX_PAGE_SIZE: &str = "20000";
+
+/// Keeps every request made with one API key inside Fingrid's limits: one call
+/// per two seconds, and at most `daily_limit` calls per UTC day (Fingrid allows
+/// 10 000). Callers queue on the lock, so requests go out one at a time.
+pub struct Throttle {
+    gap: Duration,
+    daily_limit: u32,
+    state: Mutex<ThrottleState>,
+}
+
+struct ThrottleState {
+    last: Option<Instant>,
+    day: chrono::NaiveDate,
+    used: u32,
+}
+
+impl Throttle {
+    pub fn new(gap: Duration, daily_limit: u32) -> Self {
+        Self {
+            gap,
+            daily_limit,
+            state: Mutex::new(ThrottleState { last: None, day: chrono::Utc::now().date_naive(), used: 0 }),
+        }
+    }
+
+    /// Waits for the next free slot, or fails once today's budget is spent.
+    pub async fn acquire(&self) -> Result<()> {
+        let mut st = self.state.lock().await;
+        let today = chrono::Utc::now().date_naive();
+        if st.day != today {
+            st.day = today;
+            st.used = 0;
+        }
+        if st.used >= self.daily_limit {
+            return Err(anyhow!("Daily Fingrid request budget ({}) is used up", self.daily_limit));
+        }
+        if let Some(last) = st.last {
+            tokio::time::sleep_until(last + self.gap).await;
+        }
+        st.last = Some(Instant::now());
+        st.used += 1;
+        Ok(())
+    }
+
+    /// Requests made so far today.
+    pub async fn used_today(&self) -> u32 {
+        let st = self.state.lock().await;
+        if st.day == chrono::Utc::now().date_naive() { st.used } else { 0 }
+    }
 }
 
 #[derive(Clone)]
 pub struct FingridClient {
     client: Client,
     api_key: String,
+    base: String,
+    throttle: Option<Arc<Throttle>>,
 }
 
 const API_BASE: &str = "https://data.fingrid.fi/api";
@@ -62,15 +158,39 @@ impl FingridClient {
         Ok(Self {
             client,
             api_key: api_key.to_string(),
+            base: API_BASE.to_string(),
+            throttle: None,
         })
+    }
+
+    /// Replaces the default 10 s request timeout. A full 20 000-row page can
+    /// take longer than that when Fingrid is busy.
+    pub fn with_timeout(mut self, timeout: Duration) -> Result<Self> {
+        self.client = Client::builder().timeout(timeout).build()?;
+        Ok(self)
+    }
+
+    /// Points the client at another API root — a test double, say.
+    pub fn with_base(mut self, base: &str) -> Self {
+        self.base = base.trim_end_matches('/').to_string();
+        self
+    }
+
+    /// Routes every request, retries included, through a shared throttle.
+    pub fn with_throttle(mut self, throttle: Arc<Throttle>) -> Self {
+        self.throttle = Some(throttle);
+        self
     }
 
     /// Sends a GET to the Fingrid API, retrying on `429 Too Many Requests`.
     /// Any other status, success or not, is returned to the caller.
     async fn get(&self, path: &str, query: &[(&str, &str)], what: &str) -> Result<reqwest::Response> {
-        let url = format!("{}{}", API_BASE, path);
+        let url = format!("{}{}", self.base, path);
         let mut retries = 0;
         loop {
+            if let Some(throttle) = &self.throttle {
+                throttle.acquire().await?;
+            }
             let res = self.client.get(&url)
                 .header("x-api-key", &self.api_key)
                 .header("Accept", "application/json")
@@ -108,12 +228,26 @@ impl FingridClient {
 
     /// Fetches all 249+ datasets from Fingrid
     pub async fn get_datasets(&self) -> Result<Vec<Dataset>> {
-        let res = self.get("/datasets", &[("pageSize", "400")], "fetching datasets").await?;
-        if !res.status().is_success() {
-            return Err(anyhow!("Failed to fetch datasets: Status {}", res.status()));
+        let mut all = Vec::new();
+        let mut page = 1u32;
+        loop {
+            let page_str = page.to_string();
+            let res = self.get(
+                "/datasets",
+                &[("pageSize", "400"), ("page", &page_str)],
+                "fetching datasets",
+            ).await?;
+            if !res.status().is_success() {
+                return Err(anyhow!("Failed to fetch datasets: Status {}", res.status()));
+            }
+            let body: DatasetListResponse = res.json().await?;
+            all.extend(body.data);
+            match Pagination::next(&body.pagination) {
+                Some(next) if next > page && page < 5 => page = next,
+                _ => break,
+            }
         }
-        let body: DatasetListResponse = res.json().await?;
-        Ok(body.data)
+        Ok(all)
     }
 
     /// Fetches timeseries data for a single dataset ID
@@ -130,7 +264,117 @@ impl FingridClient {
             return Err(anyhow!("Query failed for dataset ID {} (status {}): {}", id, status, body));
         }
 
-        let body: DataPointsResponse = res.json().await?;
-        Ok(body.data)
+        let body: RawDataPointsResponse = res.json().await?;
+        Ok(into_points(body.data))
+    }
+
+    /// One page — the newest rows first — of a dataset's series. The flag is
+    /// true when the window holds more rows than fit on it, as it does for
+    /// Fingrid's sub-second measurements over anything but a short window.
+    pub async fn get_dataset_data_newest(
+        &self,
+        id: i32,
+        start_time: &str,
+        end_time: &str,
+    ) -> Result<(Vec<DataPoint>, bool)> {
+        let res = self.get(
+            &format!("/datasets/{}/data", id),
+            &[
+                ("startTime", start_time),
+                ("endTime", end_time),
+                ("pageSize", MAX_PAGE_SIZE),
+                ("sortBy", "startTime"),
+                ("sortOrder", "desc"),
+            ],
+            &format!("querying dataset ID {}", id),
+        ).await?;
+
+        if !res.status().is_success() {
+            let status = res.status();
+            let body = res.text().await.unwrap_or_default();
+            return Err(anyhow!("Query failed for dataset ID {} (status {}): {}", id, status, body));
+        }
+
+        let body: RawDataPointsResponse = res.json().await?;
+        let truncated = Pagination::next(&body.pagination).is_some();
+        Ok((into_points(body.data), truncated))
+    }
+
+    /// Several datasets over one window in as few calls as Fingrid allows —
+    /// one, unless the rows overflow a page.
+    pub async fn get_multi_data(&self, ids: &[i32], start_time: &str, end_time: &str) -> Result<Vec<DataPoint>> {
+        let ids_str = ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
+        let mut all = Vec::new();
+        let mut page = 1u32;
+        loop {
+            let page_str = page.to_string();
+            let res = self.get(
+                "/data",
+                &[
+                    ("datasets", &ids_str),
+                    ("startTime", start_time),
+                    ("endTime", end_time),
+                    ("pageSize", MAX_PAGE_SIZE),
+                    ("page", &page_str),
+                ],
+                "querying multiple datasets",
+            ).await?;
+
+            if !res.status().is_success() {
+                let status = res.status();
+                let body = res.text().await.unwrap_or_default();
+                return Err(anyhow!("Query failed for datasets {} (status {}): {}", ids_str, status, body));
+            }
+
+            let body: RawDataPointsResponse = res.json().await?;
+            all.extend(into_points(body.data));
+            match Pagination::next(&body.pagination) {
+                Some(next) if next > page && page < 5 => page = next,
+                _ => break,
+            }
+        }
+        Ok(all)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn null_and_non_finite_values_are_dropped() {
+        let body: RawDataPointsResponse = serde_json::from_str(r#"{
+            "data": [
+                {"datasetId": 1, "startTime": "a", "endTime": "b", "value": 1.5},
+                {"datasetId": 1, "startTime": "c", "endTime": "d", "value": null}
+            ],
+            "pagination": {"total": 2, "lastPage": 1, "nextPage": null, "currentPage": 1}
+        }"#).unwrap();
+        assert!(Pagination::next(&body.pagination).is_none());
+        let points = into_points(body.data);
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].value, 1.5);
+    }
+
+    #[test]
+    fn next_page_is_read_from_pagination() {
+        let body: RawDataPointsResponse = serde_json::from_str(
+            r#"{"data": [], "pagination": {"nextPage": 2}}"#,
+        ).unwrap();
+        assert_eq!(Pagination::next(&body.pagination), Some(2));
+        let bare: RawDataPointsResponse = serde_json::from_str(r#"{"data": []}"#).unwrap();
+        assert!(Pagination::next(&bare.pagination).is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn throttle_spaces_calls_and_enforces_the_daily_budget() {
+        let throttle = Throttle::new(Duration::from_secs(2), 3);
+        let t0 = Instant::now();
+        throttle.acquire().await.unwrap();
+        throttle.acquire().await.unwrap();
+        throttle.acquire().await.unwrap();
+        assert!(Instant::now() - t0 >= Duration::from_secs(4));
+        assert!(throttle.acquire().await.is_err());
+        assert_eq!(throttle.used_today().await, 3);
     }
 }
