@@ -2,6 +2,15 @@
 
 A self-hosted tool that retrieves metrics from the new Fingrid Open Data API and exports them to InfluxDB. It features a mobile-first dataset catalog browser and interactive live-preview charts.
 
+This repository builds two apps from one codebase:
+
+| App | What it is | Image |
+|---|---|---|
+| **FingridFlow** (collector) | Private tool: log in with your key, pick datasets, export them to InfluxDB | `ghcr.io/saavuori/fingrid-data-collector` |
+| **FingridFlow Live** (viewer) | Public, read-only dashboard of Finland's power system and every Fingrid dataset — no login, no collecting | `ghcr.io/saavuori/fingrid-data-collector-viewer` |
+
+FingridFlow Live is described [below](#fingridflow-live--public-dashboard).
+
 ![FingridFlow Dashboard](docs/images/dashboard.png)
 
 ---
@@ -96,3 +105,57 @@ Measurements are stored using this InfluxDB Line Protocol schema:
 ```
 fingrid,dataset_id=<id>,dataset_name=<escaped_name>,unit=<escaped_unit> value=<float_value> <timestamp_seconds>
 ```
+
+---
+
+## FingridFlow Live — public dashboard
+
+A read-only website in the spirit of Fingrid's [power system state](https://www.fingrid.fi/sahkomarkkinat/sahkojarjestelman-tila/) page, built to be published:
+
+- **Grid now** — system state and shortage alerts, consumption, production, net import/export, frequency and CO₂ intensity with 24 h sparklines; production by source as a stacked 24 h chart with consumption on top; consumption and production with Fingrid's forecast for the next 24 h; live cross-border flows (SE1, SE3, Norway, Estonia) with direction.
+- **All data** — every dataset in Fingrid's catalog, searchable in Finnish and English, filterable by category and unit. Each dataset opens with 24 h / 3 / 7 / 30 day ranges, forecasts drawn past a "Now" line, a table view, CSV download and a shareable link.
+- **Suomi / English**, dark and light themes, works on a phone.
+
+### How it protects the API key and the rate limit
+
+Visitors never reach Fingrid. The API key stays on the server (an environment variable or podman secret), and every response comes from a shared server-side cache:
+
+- The front page is one multi-dataset call, refreshed every ~2.5 minutes in the background.
+- Dataset pages offer fixed ranges, so all visitors share one cached fetch per dataset and range (3 min to 1 h, depending on the range). Many visitors opening the same link cost one upstream call.
+- Upstream calls are spaced ≥ 2.1 s apart and capped per day (`FINGRID_DAILY_LIMIT`, default 8000 of Fingrid's 10 000). If Fingrid fails, the last good copy is served.
+
+### Deploying on a server with podman (Quadlet)
+
+The image is published by CI on every push to `main`. GHCR creates new packages as **private**: either make `fingrid-data-collector-viewer` public (GitHub → Packages → Package settings → Change visibility), or run `podman login ghcr.io` on the server with a token that has `read:packages`.
+
+On the server, as the user that runs your containers:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Saavuori/fingrid-data-collector/main/deploy/viewer/install.sh | bash
+```
+
+It asks for your Fingrid API key once, stores it as the podman secret `fingrid_api_key`, installs [`fingrid-viewer.container`](deploy/viewer/fingrid-viewer.container) as a user systemd service listening on `127.0.0.1:3010`, and enables `podman auto-update` so new images from CI roll out automatically. Then route Caddy to it, on its own domain or under a path such as `/fingrid/` — see [`Caddyfile.example`](deploy/viewer/Caddyfile.example).
+
+For Docker or podman-compose instead, use [`deploy/viewer/compose.yaml`](deploy/viewer/compose.yaml).
+
+| Variable | Default | |
+|---|---|---|
+| `FINGRID_API_KEY` | — | Your key, or `FINGRID_API_KEY_FILE` pointing at a file holding it |
+| `FINGRID_DAILY_LIMIT` | `8000` | Upstream calls allowed per UTC day |
+| `PORT` | `3000` | Listen port inside the container |
+
+`GET /api/health` reports whether the front page is fresh and how many Fingrid calls were made today.
+
+### Developing the viewer
+
+```bash
+# backend on :3002
+cd backend && FINGRID_API_KEY=... PORT=3002 DIST_DIR=../frontend/dist-viewer cargo run --bin fingrid-viewer
+# frontend dev server, proxying /api to :3002
+cd frontend && npm run dev:viewer
+```
+
+The viewer's frontend lives in `frontend/src/viewer` and shares the theme and UI components with the collector; `npm run build:viewer` builds it to `frontend/dist-viewer`. The backend is `backend/src/bin/fingrid-viewer`, sharing the Fingrid client in `backend/src/fingrid_client.rs`.
+
+Data: [Fingrid Open Data](https://data.fingrid.fi), licensed CC BY 4.0. The dashboard credits it in its footer; keep that if you change the page.
+

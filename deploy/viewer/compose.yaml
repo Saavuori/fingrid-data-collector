@@ -1,0 +1,17 @@
+# FingridFlow Live with Docker or podman-compose, for hosts without Quadlet.
+#   echo "FINGRID_API_KEY=your-key" > .env && docker compose up -d
+services:
+  fingrid-viewer:
+    image: ghcr.io/saavuori/fingrid-data-collector-viewer:latest
+    container_name: fingrid-viewer
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3010:3000"
+    environment:
+      FINGRID_API_KEY: ${FINGRID_API_KEY:?set FINGRID_API_KEY in .env}
+      FINGRID_DAILY_LIMIT: "8000"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL

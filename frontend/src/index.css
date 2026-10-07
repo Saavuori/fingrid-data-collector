@@ -147,3 +147,14 @@ textarea {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Cross-border flow lines: dashes travel from sender to receiver. */
+@keyframes flowDash {
+  to {
+    stroke-dashoffset: -20;
+  }
+}
+.flow-dash {
+  stroke-dasharray: 6 14;
+  animation: flowDash 1.1s linear infinite;
+}

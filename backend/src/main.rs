@@ -1,4 +1,4 @@
-mod fingrid_client;
+use fingrid_collector::fingrid_client;
 mod influx;
 
 use axum::{

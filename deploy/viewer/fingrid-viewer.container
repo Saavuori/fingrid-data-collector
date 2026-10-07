@@ -1,0 +1,43 @@
+# Podman Quadlet unit for FingridFlow Live, the public Fingrid dashboard.
+#
+# Install for a rootless user (e.g. opc) as
+#   ~/.config/containers/systemd/fingrid-viewer.container
+# then `systemctl --user daemon-reload && systemctl --user start fingrid-viewer`.
+# install.sh in this directory does all of it. Needs podman 4.4 or newer.
+
+[Unit]
+Description=FingridFlow Live — public Fingrid open data dashboard
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+ContainerName=fingrid-viewer
+Image=ghcr.io/saavuori/fingrid-data-collector-viewer:latest
+# `podman auto-update` (its systemd timer) pulls new images and restarts.
+AutoUpdate=registry
+
+# Loopback only: Caddy is the public entrance. If Caddy runs as a container
+# on a podman network instead, drop this and set Network= to that network.
+PublishPort=127.0.0.1:3010:3000
+
+# The Fingrid API key, from a podman secret: never in this file or the image.
+Secret=fingrid_api_key,type=env,target=FINGRID_API_KEY
+Environment=RUST_LOG=info
+# Fingrid allows 10 000 calls a day per key; leave headroom for other uses.
+Environment=FINGRID_DAILY_LIMIT=8000
+
+# The app writes nothing, so it can run locked down.
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=ALL
+
+HealthCmd=wget -qO- http://127.0.0.1:3000/api/health
+HealthInterval=60s
+HealthStartPeriod=20s
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target
